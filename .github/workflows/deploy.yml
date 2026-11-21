@@ -55,9 +55,11 @@ jobs:
       - name: Build the public site
         env:
           HF_DATASET_REPO: ${{ vars.HF_DATASET_REPO }}
+          PAGES_URL: ${{ steps.pages.outputs.base_url }}
         run: |
           : "${HF_DATASET_REPO:?Set the HF_DATASET_REPO repository variable to the public Hugging Face dataset ID}"
-          python builder/build.py --hf-repo "$HF_DATASET_REPO" --dataset out/hf-cache --out out/site
+          python builder/build.py --hf-repo "$HF_DATASET_REPO" --dataset out/hf-cache --out out/site \
+            --previous-site "$PAGES_URL"
       - uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4.0.0
         with:
           path: out/site

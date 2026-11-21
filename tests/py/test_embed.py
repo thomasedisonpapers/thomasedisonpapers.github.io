@@ -1,5 +1,7 @@
 """Embeddings: public text only, each passage encoded once, and a store that is either whole or untouched."""
 import json
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
+from threading import Event
 
 import numpy as np
 import pytest
@@ -152,6 +154,43 @@ def test_a_worker_finishing_after_a_replan_does_not_add_duplicate_passages(tmp_p
     assert sorted(embed.load_vectors(store / MODEL)[0]) == list("bcde")
 
 
+def test_a_replan_waits_for_collection_and_keeps_its_new_chunk(tmp_path, monkeypatch):
+    store = tmp_path / "store"
+    encoder = _fake_encoder([])
+    monkeypatch.setattr(embed, "wanted", lambda *_: {"D1": [("a", "a")]})
+    embed.plan(tmp_path, store, MODEL)
+    embed.encode_chunks(store, MODEL, encoder)
+    collecting, replanning, release = Event(), Event(), Event()
+    write_json = embed._write_json
+
+    def pause_collection(path, value):
+        if path.name == "manifest.json":
+            collecting.set()
+            assert release.wait(timeout=5)
+        write_json(path, value)
+
+    def replan():
+        replanning.set()
+        return embed.plan(tmp_path, store, MODEL)
+
+    monkeypatch.setattr(embed, "_write_json", pause_collection)
+    monkeypatch.setattr(embed, "wanted", lambda *_: {"D1": [("a", "a"), ("b", "b")]})
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        old = workers.submit(embed.collect, store, MODEL)
+        try:
+            assert collecting.wait(timeout=5)
+            new = workers.submit(replan)
+            assert replanning.wait(timeout=5)
+            with pytest.raises(TimeoutError):
+                new.result(timeout=0.1)
+        finally:
+            release.set()
+        old.result(timeout=5)
+        new.result(timeout=5)
+
+    assert embed.encode_chunks(store, MODEL, encoder) == 1
+
+
 def test_a_retry_reuses_a_legacy_chunk_when_its_passage_keys_match(tmp_path):
     dataset = _dataset(tmp_path, [_record("E2002AAA")])
     store = tmp_path / "store"
@@ -204,6 +243,37 @@ def test_withdrawing_most_documents_compacts_the_dead_rows_away(tmp_path):
     assert sum(p["count"] for p in result["parts"]) == result["passages"]
 
 
+def test_withdrawing_one_document_removes_its_vectors_and_invalidates_related_documents(tmp_path):
+    ids = [f"E2002AA{suffix}" for suffix in "ABCDEF"]
+    _run(tmp_path, [_record(doc, title=f"Letter {doc}") for doc in ids])
+    root = tmp_path / "store" / MODEL
+    related = root / "related.json"
+    related.write_text(json.dumps(embed.related(root)), encoding="utf-8")
+    manifest_path = tmp_path / "dataset" / "local" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["withdrawn"] = [ids[-1]]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    result = _run(tmp_path, [])
+    assert (sum(part["count"] for part in result["parts"]), related.exists()) == (result["passages"], False)
+
+
 def test_a_document_is_never_its_own_related_document(tmp_path):
     _run(tmp_path, [_record(f"E2002AA{c}") for c in "ABC"])
     assert all(doc not in [other for other, _ in near] for doc, near in embed.related(tmp_path / "store" / MODEL, k=2).items())
+
+
+def test_a_single_document_has_no_related_documents(tmp_path):
+    _run(tmp_path, [_record("E2002AAA")])
+    assert embed.related(tmp_path / "store" / MODEL) == {"E2002AAA": []}
+
+
+def test_semantic_search_returns_no_hits_when_all_documents_are_withdrawn(tmp_path):
+    _run(tmp_path, [_record("E2002AAA")])
+    manifest_path = tmp_path / "dataset" / "local" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["withdrawn"] = ["E2002AAA"]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    _run(tmp_path, [])
+
+    assert embed.search(tmp_path / "store" / MODEL, np.ones(DIM, dtype=np.float32)) == []

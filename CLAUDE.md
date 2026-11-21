@@ -27,6 +27,7 @@ node --test "tests/js/**/*.test.js"                       # front-end tests
 .venv/Scripts/python.exe builder/build.py --dataset out/dataset --out out/site   # build; preview serves out/ at /site/
 .venv/Scripts/python.exe builder/embed.py plan --dataset out/dataset --store out/dataset/embeddings --model arctic-embed-s
 # then encode on Amarel (deploy/amarel/embed.sbatch), copy done/ back, and run: embed.py collect --store … --model …
+.venv/Scripts/python.exe builder/upload.py --dataset out/dataset --dry-run   # then without --dry-run; see docs/DEPLOY.md
 ```
 
 ## Rules

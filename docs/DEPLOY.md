@@ -33,6 +33,7 @@ host (`github.io`) in `web/` or `builder/`.
 3. **Settings → Pages → Build and deployment → Source:** choose **GitHub Actions**.
    - The deploy workflow uploads the built site straight to Pages, so built files and data never enter git history.
    - That is what makes a takedown complete.
+   - Each deployment carries forward the previous static asset bundle so cached pages can still load their scripts and styles.
 4. **Settings → Rules:** protect `main`.
    - The `tests` workflow must pass.
    - Force pushes and deletion are blocked.
@@ -40,9 +41,46 @@ host (`github.io`) in `web/` or `builder/`.
    - require actions to be pinned to a full commit SHA;
    - give the workflow token read-only access by default.
 6. **Settings → Secrets and variables → Actions:**
-   - `HF_TOKEN`: a fine-grained Hugging Face token that can write only to the dataset;
-   - `HF_DATASET`: the dataset's name.
+   - **the variable `HF_DATASET_REPO`** (`thomasedisonpapers/edison-papers`): set it only once the dataset is public. The
+     deploy workflow skips until it exists, and reads the dataset anonymously, so deploying needs no token.
+   - **the secret `HF_TOKEN`:** a fine-grained token that can write only to the dataset. Only the harvest workflow needs it,
+     to write `edisondigital/`. The publisher's uploads use the uploading machine's own sign-in.
 7. **Publisher on the host:** run `publish --site-url https://<org>.github.io`, so each PDF prints the site's address.
+
+## Uploading the dataset
+
+`builder/upload.py` sends the publisher's output (`local/` and `embeddings/`) to the Hugging Face dataset. It never touches
+`edisondigital/`, which belongs to the harvester.
+
+1. **Sign in once on the machine that uploads,** with a fine-grained token that can write only to the dataset:
+   `.venv/Scripts/hf auth login`. You can also set `HF_TOKEN` for one session. The script never prints the token or takes
+   it on the command line.
+2. **Check, then look before sending:**
+   - `python builder/upload.py --dataset out/dataset --check-only` runs the public-boundary check alone, offline;
+   - `python builder/upload.py --dataset out/dataset --dry-run` shows how many files would be sent, replaced and removed.
+3. **Upload:** `python builder/upload.py --dataset out/dataset`. The uploader validates and sends a temporary copy of
+   the release. Allow temporary disk space for the dataset and let the local export finish before starting. Each run:
+   1. refuses to start if anything breaks the boundary:
+      - a field outside the allowlist;
+      - a test folder;
+      - a withdrawn document's files;
+      - a stray file;
+      - a scan still carrying EXIF or XMP metadata;
+      - a page path climbing out of its folder;
+      - embeddings of an unpublished document;
+   2. refuses a first upload to a repository that is already public, so first content always lands private;
+   3. pre-uploads changed large files in batches of up to 100;
+   4. publishes changed files, manifests, and removals together in one commit on `main`;
+   5. verifies the resulting commit against the local files under `local/` and `embeddings/`.
+
+   Rerun an interrupted upload or one refused because `main` changed during the upload. The uploader compares against
+   the latest commit before trying again.
+4. **Making the dataset public** happens once, by hand, in the dataset's settings, after the first upload has been checked.
+   Then set the repository variable `HF_DATASET_REPO` on GitHub. Run **Deploy archive** from the Actions tab or wait
+   for the next push to `main`.
+5. **Withdrawals:** once the publisher has withdrawn a document, replan and collect any affected embedding store.
+   Collection removes unreferenced vectors and clears stale related-document results. The next upload removes the
+   withdrawn files from `main`. A takedown also needs the dataset history squashed (`HfApi().super_squash_history`).
 
 ## 3. Moving to a domain later
 

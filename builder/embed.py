@@ -19,6 +19,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+from filelock import FileLock
 
 import build
 
@@ -35,8 +36,6 @@ MODELS = {
 WINDOW_WORDS = 180
 STRIDE_WORDS = 144
 CHUNK_PASSAGES = 4096
-# Parts are rewritten without dead rows only when this share of them is dead, so an ordinary update uploads one new file.
-COMPACT_AT = 0.25
 _DOCID_PREFIX = re.compile(r"^\s*\[[A-Za-z0-9_-]+\],?\s*")
 
 
@@ -143,6 +142,11 @@ def plan(dataset: Path, store: Path, model: str, *, scope: str = "approved", chu
     if model not in MODELS:
         raise EmbedError(f"unknown model {model!r}; choose from {', '.join(MODELS)}")
     root = store / model
+    with FileLock(root / ".plan-collect.lock"):
+        return _plan(dataset, root, model, scope, chunk)
+
+
+def _plan(dataset: Path, root: Path, model: str, scope: str, chunk: int) -> dict:
     documents = wanted(dataset, scope)
     have = stored_keys(root)
     todo, seen = [], set()
@@ -230,22 +234,31 @@ def encode_chunks(store: Path, model: str, encoder, *, only: int | None = None) 
     return count
 
 
-def _take_rows(keys: list[str], vectors: np.ndarray, remaining: set[str]) -> tuple[list[str], np.ndarray]:
+def _take_indices(keys: list[str], remaining: set[str]) -> list[int]:
     indices = []
     for index, key in enumerate(keys):
         if key in remaining:
             remaining.remove(key)
             indices.append(index)
+    return indices
+
+
+def _take_rows(keys: list[str], vectors: np.ndarray, remaining: set[str]) -> tuple[list[str], np.ndarray]:
+    indices = _take_indices(keys, remaining)
     return [keys[index] for index in indices], vectors[indices]
 
 
 def collect(store: Path, model: str) -> dict:
     """Folds finished chunks into one new part and makes the plan's documents current; refuses while any passage is missing."""
     root = store / model
+    with FileLock(root / ".plan-collect.lock"):
+        return _collect(root, model)
+
+
+def _collect(root: Path, model: str) -> dict:
     planned = json.loads((root / "plan.json").read_text(encoding="utf-8"))
     parts = read_manifest(root)["parts"]
     published = part_keys(root, parts)
-    has_duplicates = len(published) < sum(part["count"] for part in parts)
     live = {k for keys in planned["documents"].values() for k in keys}
     missing = live - published
     done = sorted((root / "done").glob("chunk-*.npy"))
@@ -263,13 +276,16 @@ def collect(store: Path, model: str) -> dict:
         _save_rows(root / "parts" / name, new_keys, np.concatenate(new_vectors))
         parts.append({"name": name, "count": len(new_keys)})
     total = sum(p["count"] for p in parts)
-    dead = total - len(live)
-    if has_duplicates or (parts and dead / max(1, total) >= COMPACT_AT):
+    compacted = total > len(live)
+    if compacted:
         parts = _compact(root, parts, live)
     spec = MODELS[model]
     documents_path = root / "documents.jsonl"
+    documents = "".join(json.dumps({"id": d, "keys": k}) + "\n" for d, k in planned["documents"].items())
+    if compacted or not documents_path.exists() or documents_path.read_text(encoding="utf-8") != documents:
+        (root / "related.json").unlink(missing_ok=True)
     tmp = documents_path.with_name("documents.jsonl.tmp")
-    tmp.write_text("".join(json.dumps({"id": d, "keys": k}) + "\n" for d, k in planned["documents"].items()), encoding="utf-8")
+    tmp.write_text(documents, encoding="utf-8")
     os.replace(tmp, documents_path)
     for part in parts:
         part["sha256"] = hashlib.sha256((root / "parts" / f"{part['name']}.npy").read_bytes()).hexdigest()
@@ -292,15 +308,23 @@ def collect(store: Path, model: str) -> dict:
 
 
 def _compact(root: Path, parts: list[dict], live: set[str]) -> list[dict]:
-    """Rewrites the parts with only live rows, in parts of a bounded size."""
-    keys, vectors = load_vectors(root, parts, only=live)
+    """Rewrites only affected parts and keeps one vector per live passage."""
+    remaining = live.copy()
     # New names only, never reused, so the parts the current manifest lists stay intact until it is replaced.
-    first = max(int(p["name"][5:]) for p in parts) + 1
-    out, size = [], 200_000
-    for n, start in enumerate(range(0, len(keys), size)):
-        name = f"part-{first + n:05d}"
-        _save_rows(root / "parts" / name, keys[start:start + size], vectors[start:start + size])
-        out.append({"name": name, "count": len(keys[start:start + size])})
+    next_part = max(int(p["name"][5:]) for p in parts) + 1
+    out = []
+    for part in parts:
+        path = root / "parts" / part["name"]
+        keys = path.with_suffix(".keys").read_text(encoding="utf-8").split()
+        indices = _take_indices(keys, remaining)
+        if len(indices) == len(keys):
+            out.append(part)
+        elif indices:
+            _, vectors = _load_rows(path)
+            name = f"part-{next_part:05d}"
+            _save_rows(root / "parts" / name, [keys[i] for i in indices], vectors[indices])
+            out.append({"name": name, "count": len(indices)})
+            next_part += 1
     return out
 
 
@@ -334,12 +358,13 @@ def document_vectors(root: Path) -> tuple[list[str], np.ndarray]:
 def related(root: Path, k: int = 8, block: int = 4096) -> dict[str, list[list]]:
     """Each document's k nearest other documents with their cosine similarity, computed in blocks so memory stays bounded."""
     ids, vectors = document_vectors(root)
+    limit = max(0, min(k, len(ids) - 1))
     out = {}
     for start in range(0, len(ids), block):
         scores = vectors[start:start + block] @ vectors.T
         for i in range(scores.shape[0]):
-            scores[i, start + i] = -1
-        top = np.argsort(-scores, axis=1)[:, :k]
+            scores[i, start + i] = -np.inf
+        top = np.argsort(-scores, axis=1)[:, :limit]
         for i, row in enumerate(top):
             out[ids[start + i]] = [[ids[j], round(float(scores[i, j]), 4)] for j in row]
     return out
@@ -356,6 +381,8 @@ def encode_queries(store: Path, model: str, encoder, queries: list[str]) -> None
 def search(root: Path, query_vector: np.ndarray, k: int = 10) -> list[tuple[str, float]]:
     """Documents ranked by their best-matching passage, the way the site's vector search will rank them."""
     keys, vectors = load_vectors(root)
+    if not keys:
+        return []
     best = dict(zip(keys, (vectors.astype(np.float32) @ query_vector.astype(np.float32)).tolist()))
     scores = []
     for line in (root / "documents.jsonl").read_text(encoding="utf-8").splitlines():

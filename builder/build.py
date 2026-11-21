@@ -8,9 +8,11 @@ import logging
 import re
 import shutil
 import sys
+import zipfile
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
-from pathlib import Path
+from io import BytesIO
+from pathlib import Path, PurePosixPath
 
 from PIL import Image
 
@@ -194,6 +196,7 @@ def topic_matches(topic: dict, terms: dict[str, int]) -> bool:
 
 
 ASSET_DIRS = ("css", "js", "fonts", "img")
+ASSET_REVISION = re.compile(r"[0-9a-f]{12}")
 
 
 def copy_site(web: Path, out: Path) -> str:
@@ -230,7 +233,53 @@ def copy_site(web: Path, out: Path) -> str:
     return revision
 
 
-def build(dataset: Path, web: Path, out: Path, *, allow_shrink: bool = False, dataset_url: str | None = None) -> dict:
+def archive_assets(out: Path, revision: str) -> str:
+    """Publishes a deterministic bundle of static files so the next deploy can reuse them."""
+    root = out / "assets" / revision
+    bundles = out / "asset-bundles"
+    bundles.mkdir(exist_ok=True)
+    archive = bundles / f"{revision}.zip"
+    with zipfile.ZipFile(archive, "w") as bundle:
+        for path in sorted(root.rglob("*")):
+            if path.is_file():
+                name = path.relative_to(root).as_posix()
+                bundle.writestr(zipfile.ZipInfo(name), path.read_bytes(), compress_type=zipfile.ZIP_DEFLATED)
+    for old in bundles.glob("*.zip"):
+        if old != archive:
+            old.unlink()
+    return hashlib.sha256(archive.read_bytes()).hexdigest()
+
+
+def restore_assets(out: Path, previous: dict, current: str, site_url: str) -> None:
+    """Restores only the previous deploy's code and design assets."""
+    import requests
+
+    revision = previous.get("asset_revision")
+    if revision is None or revision == current:
+        return
+    if not isinstance(revision, str) or not ASSET_REVISION.fullmatch(revision):
+        raise BuildError("invalid previous asset revision")
+    try:
+        response = requests.get(f"{site_url.rstrip('/')}/asset-bundles/{revision}.zip", timeout=30)
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        raise BuildError(f"could not download the previous asset bundle: {exc}") from exc
+    if hashlib.sha256(response.content).hexdigest() != previous.get("asset_bundle_sha256"):
+        raise BuildError("the previous asset bundle did not match its checksum")
+    root = out / "assets" / revision
+    with zipfile.ZipFile(BytesIO(response.content)) as bundle:
+        for name in bundle.namelist():
+            path = PurePosixPath(name)
+            if (len(path.parts) < 2 or path.parts[0] not in ASSET_DIRS
+                    or ".." in path.parts or "\\" in name or ":" in name):
+                raise BuildError(f"unexpected previous asset path: {name}")
+            target = root.joinpath(*path.parts)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(bundle.read(name))
+
+
+def build(dataset: Path, web: Path, out: Path, *, allow_shrink: bool = False, dataset_url: str | None = None,
+          previous_site: str | None = None) -> dict:
     """Writes the site (copied from `web`) and its data to `out`; raises BuildError rather than publish a bad build."""
     local, manifest = load_local(dataset)
     remote = load_edisondigital(dataset)
@@ -261,7 +310,9 @@ def build(dataset: Path, web: Path, out: Path, *, allow_shrink: bool = False, da
     if previous.get("approved") and approved < previous["approved"] - max(5, previous["approved"] // 10) and not allow_shrink:
         raise BuildError(f"approved documents fell from {previous['approved']} to {approved}")
 
-    copy_site(web, out)
+    asset_revision = copy_site(web, out)
+    if previous_site:
+        restore_assets(out, previous, asset_revision, previous_site)
     if dataset_url:
         write_json(out / "sources.json", {"dataset": [dataset_url]})
     data_root = out / "data"
@@ -366,6 +417,9 @@ def build(dataset: Path, web: Path, out: Path, *, allow_shrink: bool = False, da
         shutil.rmtree(final)
     site_data.rename(final)
     pointer = {"revision": revision, "built_at": built_at, "documents": len(summaries), "approved": approved}
+    if dataset_url:
+        pointer["asset_revision"] = asset_revision
+        pointer["asset_bundle_sha256"] = archive_assets(out, asset_revision)
     # The pointer moves last; the build before stays on disk so pages already open keep reading a consistent set.
     write_json(data_root / "current.json", pointer)
     keep = {revision, previous.get("revision")}
@@ -394,6 +448,7 @@ def main(argv=None) -> int:
     parser.add_argument("--web", default=str(Path(__file__).resolve().parents[1] / "web"), help="The site's source files")
     parser.add_argument("--out", required=True, help="Where the built site goes")
     parser.add_argument("--hf-repo", help="Build from this public Hugging Face dataset and use its revision for page files")
+    parser.add_argument("--previous-site", help="Restore the previous public site's static assets using its saved pointer")
     parser.add_argument("--allow-shrink", action="store_true", help="Publish even though documents were removed")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
@@ -402,7 +457,8 @@ def main(argv=None) -> int:
         dataset_url = None
         if args.hf_repo:
             dataset, dataset_url = download_public_dataset(args.hf_repo, dataset)
-        build(dataset, Path(args.web), Path(args.out), allow_shrink=args.allow_shrink, dataset_url=dataset_url)
+        build(dataset, Path(args.web), Path(args.out), allow_shrink=args.allow_shrink, dataset_url=dataset_url,
+              previous_site=args.previous_site)
     except BuildError as exc:
         logger.error("build refused: %s", exc)
         return 1

@@ -562,8 +562,8 @@ What changes:
     2. `encode` runs on Amarel, one Slurm array task per chunk, resumable;
     3. `collect` folds the results into an append-only part and writes the manifest last;
     4. `related` precomputes each document's nearest documents.
-  - **Store:** float16 unit vectors in parts of up to 200,000 rows. Parts are rewritten only when a quarter of their rows
-    are dead.
+  - **Store:** float16 unit vectors in separate parts. Collection rewrites any part containing unreferenced rows and
+    clears stale related-document results when the document list or passage keys change.
 - **Amarel:** `deploy/amarel/embed.sbatch` reuses the drafting job's environment. Models are fetched once to
   `~/edison-amarel/embed/models` by `fetch_models.py`. The CPU partition `cmain` started small runs within minutes when the
   GPU queue was five hours deep.

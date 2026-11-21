@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 
 import pytest
+import requests
 from PIL import Image
 
 import build
@@ -160,6 +161,24 @@ def test_a_public_build_serves_page_files_from_its_dataset_revision(dataset):
     url = "https://huggingface.co/datasets/edison/archive/resolve/abc123/"
     _build(dataset, dataset_url=url)
     assert build.read_json(dataset / "site" / "sources.json") == {"dataset": [url]}
+
+
+def test_a_fresh_public_build_keeps_the_asset_urls_from_the_previous_html(dataset, monkeypatch):
+    source = "https://huggingface.co/datasets/edison/archive/resolve/abc123/"
+    previous = _build(dataset, dataset_url=source)
+    revision = previous["asset_revision"]
+    archive = dataset / "site" / "asset-bundles" / f"{revision}.zip"
+    response = requests.Response()
+    response.status_code = 200
+    response._content = archive.read_bytes()
+    monkeypatch.setattr(requests, "get", lambda url, **_: response)
+
+    out = dataset / "fresh-site"
+    build.write_json(out / "data" / "current.json", previous)
+    (dataset / "web" / "js" / "home.js").write_text("// updated home", "utf-8")
+    build.build(dataset / "dataset", dataset / "web", out, dataset_url=source, previous_site="https://example.test")
+
+    assert (out / "assets" / revision / "js" / "home.js").read_text("utf-8") == "// home"
 
 
 def test_a_withdrawn_document_is_left_out(dataset):

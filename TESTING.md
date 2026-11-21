@@ -23,6 +23,11 @@ repository is on GitHub, mark the `tests` check as required in branch protection
   - passages come only from public records, never drafts outside the chosen scope or withdrawn documents;
   - each passage is encoded once, and an edit re-encodes only what changed;
   - a store is whole or untouched, a re-run job skips finished chunks, and dead rows are compacted away.
+- **Upload** (`tests/py/test_upload.py`, against an in-memory stand-in for Hugging Face):
+  - nothing outside the allowlist, no test folder, withdrawn or stray file, image metadata or unpublished embedding is sent;
+  - a first upload never lands in a public repository;
+  - changed files, manifests and removals publish in one commit, and the harvester's files are never removed;
+  - what landed is compared with what was sent.
 - **Search** (`tests/js/search.test.js`):
   - the query language and ranking;
   - filters and sorting;
