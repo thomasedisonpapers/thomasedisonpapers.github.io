@@ -1,5 +1,5 @@
 // The repeated pieces of every listing: topic cards, collection entries and document entries.
-import { badge, esc, facts, icon, plural, thumbHtml } from "./core.js";
+import { STATUS, badge, esc, facts, icon, plural, thumbHtml } from "./core.js";
 
 export function topicCard(t, base) {
   return `<a class="topic" href="topic.html?id=${encodeURIComponent(t.id)}">
@@ -27,4 +27,11 @@ export function documentEntry(s, base, { title = null, description = null, match
       ${facts(s, { collection })}
       <div class="item-foot">${badge(s.status)}<span>${esc(s.id)}</span>${s.pages ? `<span>${plural(s.pages, "page")}</span>` : ""}
         ${matched ? `<span>Matched in ${esc(matched)}</span>` : ""}</div></div></article>`;
+}
+
+/** A row of documents related by meaning, each a thumbnail with its title, date and status, linking to the document. */
+export function relatedShelf(items, base) {
+  return items.map((s) => `<a class="shelf-item" href="document.html?id=${encodeURIComponent(s.id)}">
+    ${thumbHtml(s, base, { alt: "" })}<strong>${esc(s.title)}</strong>
+    <span>${esc(s.date || "Undated")} · ${esc((STATUS[s.status] || STATUS.none).label)}</span></a>`).join("");
 }

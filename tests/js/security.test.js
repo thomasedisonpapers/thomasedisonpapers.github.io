@@ -1,7 +1,7 @@
 // Untrusted text (AI drafts, harvested catalogue values, URL parameters) can never become markup on any page.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { documentEntry, folderEntry, topicCard } from "../../web/js/cards.js";
+import { documentEntry, folderEntry, relatedShelf, topicCard } from "../../web/js/cards.js";
 import { badge, crumbs, esc, facts, thumbHtml, validId } from "../../web/js/core.js";
 import { highlight, parseQuery } from "../../web/js/search.js";
 import { renderTranscription } from "../../web/js/transcript.js";
@@ -31,6 +31,10 @@ const hostileSummary = {
 
 test("a hostile title, description and names cannot inject markup into a document entry", () => {
   assertSafe(documentEntry(hostileSummary, "../dataset/"));
+});
+
+test("a hostile title and date cannot inject markup into the related documents shelf", () => {
+  assertSafe(relatedShelf([hostileSummary], "../dataset/"));
 });
 
 test("a hostile collection title and description cannot inject markup into a collection entry", () => {

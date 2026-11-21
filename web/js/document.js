@@ -1,8 +1,9 @@
 // A document read side by side: the scan with zoom, pan and turning on the left, its transcription and details on the right.
 import { STATUS, badge, catalog, crumbs, dataPath, dataUrl, datasetUrls, esc, facts, fetchJSON, footer, header, icon, indexMeta, param, plural,
-  statusHelp, summaries, validId, wireHelp } from "./core.js";
+  sources, statusHelp, summaries, validId, wireHelp } from "./core.js";
 import { Index, fold } from "./search.js";
 import { renderTranscription } from "./transcript.js";
+import { relatedShelf } from "./cards.js";
 
 const MAX_ZOOM = 8;
 const EDISONDIGITAL = "https://edisondigital.rutgers.edu/";
@@ -60,6 +61,22 @@ function aboutTable(record) {
     <dt>Transcription</dt><dd>${badge(record.status)}</dd>
     ${external ? `<dt>Also at</dt><dd><a href="${esc(record.edisondigital.document)}" rel="noopener" target="_blank">edisondigital.rutgers.edu ${icon("external-link")}</a></dd>` : ""}
   </dl><p style="margin-top:16px">${statusHelp()}</p>`;
+}
+
+// Related documents load after the page itself, so a slow or missing list never holds up reading.
+async function showRelated(record) {
+  const ordinals = (record.related || []).filter((n) => Number.isInteger(n) && n >= 0);
+  if (!ordinals.length) return;
+  try {
+    const [items, { dataset }] = await Promise.all([summaries(ordinals), sources()]);
+    const section = document.getElementById("related");
+    const found = items.filter((s) => s && s.id);
+    if (!section || !found.length) return;
+    section.querySelector(".shelf").innerHTML = relatedShelf(found, dataset[0]);
+    section.hidden = false;
+  } catch {
+    // The page is complete without them, so a failure leaves the section hidden.
+  }
 }
 
 async function render() {
@@ -137,8 +154,14 @@ async function render() {
     ${previous ? `<a class="btn" href="document.html?id=${encodeURIComponent(previous.id)}">${icon("chevron-left")}${esc(previous.id)}</a>` : "<span></span>"}
     <a class="btn link" href="folder.html?id=${encodeURIComponent(folder.id)}">All ${plural(folder.documents.length, "document")} in this collection</a>
     ${next ? `<a class="btn" href="document.html?id=${encodeURIComponent(next.id)}">${esc(next.id)}${icon("chevron-right")}</a>` : "<span></span>"}
-  </nav>` : ""}`;
+  </nav>` : ""}
+  <section class="related-docs" id="related" hidden aria-labelledby="related-title">
+    <div class="block-head"><div><h2 id="related-title">Related documents</h2>
+      <p>Documents about similar things, found by meaning across every collection.</p></div></div>
+    <div class="shelf"></div>
+  </section>`;
   wireHelp();
+  showRelated(record);
   await wireDownloads(record);
   wireTabs();
   const viewer = new Viewer(page.querySelector(".scan-pane"), pages, record);

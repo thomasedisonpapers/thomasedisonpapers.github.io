@@ -337,3 +337,48 @@ def test_the_deploy_downloads_records_and_first_thumbnails_but_no_scans(dataset,
     monkeypatch.setattr(huggingface_hub, "snapshot_download", fake_snapshot)
     build.download_public_dataset("org/repo", dataset / "cache")
     assert not [p for p in asked if "/view/" in p or "/full/" in p or p.endswith((".pdf", "**"))]
+
+
+def _related(tmp, model="arctic-embed-s", near=None):
+    path = tmp / "dataset" / "embeddings" / model / "related.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    near = near or {"E2002AAA": [["E2002AAA", 1.0], ["E2002ZZZ", 0.9], ["E2002AAC", 0.8], ["E2002AAB", 0.7]]}
+    path.write_text(json.dumps(near), "utf-8")
+
+
+def _related_of(tmp, document_id):
+    documents = _data(tmp, "folders/E2002.json")["documents"]
+    return next(d for d in documents if d["id"] == document_id).get("related")
+
+
+def _ordinal(tmp, document_id):
+    return next(n for n, s in enumerate(_data(tmp, "docs/0.json")) if s["id"] == document_id)
+
+
+def test_a_document_lists_its_related_documents_in_order_by_ordinal(dataset):
+    _related(dataset)
+    _build(dataset)
+    assert _related_of(dataset, "E2002AAA") == [_ordinal(dataset, "E2002AAC"), _ordinal(dataset, "E2002AAB")]
+
+
+def test_a_related_document_missing_from_the_build_is_left_out(dataset):
+    _related(dataset, near={"E2002AAA": [["E2002ZZZ", 0.9]]})
+    _build(dataset)
+    assert _related_of(dataset, "E2002AAA") is None
+
+
+def test_the_stronger_models_related_documents_are_preferred(dataset):
+    _related(dataset, "arctic-embed-s", {"E2002AAA": [["E2002AAB", 0.9]]})
+    _related(dataset, "qwen3-embedding-0.6b", {"E2002AAA": [["E2002AAC", 0.9]]})
+    _build(dataset)
+    assert _related_of(dataset, "E2002AAA") == [_ordinal(dataset, "E2002AAC")]
+
+
+def test_a_build_without_embeddings_lists_no_related_documents(dataset):
+    _build(dataset)
+    assert _related_of(dataset, "E2002AAA") is None
+
+
+def test_no_more_than_six_related_documents_are_listed():
+    ids = {f"D{n}": n for n in range(10)}
+    assert len(build.related_ordinals("D0", {"D0": list(ids)}, ids)) == build.RELATED_COUNT

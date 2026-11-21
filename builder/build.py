@@ -82,6 +82,37 @@ def load_local(dataset: Path) -> tuple[dict, dict]:
     return records, manifest
 
 
+# Related documents come from the strongest model whose results are present, so a better model takes over once run.
+RELATED_MODELS = ("qwen3-embedding-0.6b", "arctic-embed-s")
+RELATED_COUNT = 6
+
+
+def load_related(dataset: Path) -> dict[str, list[str]]:
+    """Each document's nearest documents by meaning as `embed.py related` wrote them, or nothing before the first embedding run."""
+    for model in RELATED_MODELS:
+        path = dataset / "embeddings" / model / "related.json"
+        if not path.exists():
+            continue
+        raw = read_json(path)
+        if not isinstance(raw, dict):
+            raise BuildError(f"{path} is not a map of documents to related documents")
+        return {doc: [pair[0] for pair in near if isinstance(pair, list) and pair and isinstance(pair[0], str)]
+                for doc, near in raw.items() if isinstance(near, list)}
+    return {}
+
+
+def related_ordinals(document_id: str, related: dict[str, list[str]], ordinal_of_id: dict[str, int]) -> list[int]:
+    """A document's related documents that are in this build, by ordinal; itself and anything withdrawn or unpublished are left out."""
+    out: list[int] = []
+    for other in related.get(document_id, []):
+        ordinal = ordinal_of_id.get(other)
+        if other != document_id and ordinal is not None and ordinal not in out:
+            out.append(ordinal)
+        if len(out) == RELATED_COUNT:
+            break
+    return out
+
+
 def load_edisondigital(dataset: Path) -> dict:
     """The current validated snapshot of the edisondigital mirror, one record per line, or nothing before the first harvest."""
     pointer = dataset / "edisondigital" / "current.json"
@@ -370,20 +401,27 @@ def build(dataset: Path, web: Path, out: Path, *, allow_shrink: bool = False, da
                                                    "per_file": SUMMARIES_PER_FILE})
 
     ordinal_of_id = {s["id"]: n for n, s in enumerate(summaries)}
+    related = load_related(dataset)
+
+    def with_related(record: dict) -> dict:
+        ordinals = related_ordinals(record["id"], related, ordinal_of_id)
+        return {**record, "related": ordinals} if ordinals else record
+
     by_folder: dict[str, list[dict]] = defaultdict(list)
     for record in ordered:
         folder_id = (record.get("folder") or {}).get("id", "")
         if folder_id:
             by_folder[folder_id].append(record)
         else:
-            write_json(site_data / "unfiled" / f"{record['id']}.json", record)
+            write_json(site_data / "unfiled" / f"{record['id']}.json", with_related(record))
     folder_list = []
     for folder_id, members in sorted(by_folder.items()):
         safe_id(folder_id)
         members = sorted(members, key=lambda r: r["id"])
         listing = [summaries[ordinal_of_id[r["id"]]] for r in members]
         write_json(site_data / "folders" / f"{folder_id}.json", {"id": folder_id, "title": members[0]["folder"].get("title", folder_id),
-                                                                 "description": folder_description(members), "documents": members,
+                                                                 "description": folder_description(members),
+                                                                 "documents": [with_related(r) for r in members],
                                                                  "summaries": listing})
         first = next((s for s in summaries if s["folder"] == folder_id), None)
         folder_list.append({"id": folder_id, "title": members[0]["folder"].get("title", folder_id),
@@ -438,7 +476,8 @@ def build(dataset: Path, web: Path, out: Path, *, allow_shrink: bool = False, da
 
 
 # What the build reads; scans, viewer images and PDFs stay on Hugging Face and are checked against the file listing instead.
-RECORD_PATTERNS = ["local/manifest.json", "local/*/record.json", "edisondigital/current.json", "edisondigital/*/records.jsonl"]
+RECORD_PATTERNS = ["local/manifest.json", "local/*/record.json", "edisondigital/current.json", "edisondigital/*/records.jsonl",
+                   "embeddings/*/related.json"]
 
 
 def first_thumbnails(dataset: Path, listing: set[str]) -> list[str]:

@@ -537,3 +537,8 @@ body.focus-mode .reader { height: 100dvh; border: 0; border-radius: 0; box-shado
 
 /* In-page links glide rather than jump, unless the reader has asked for less motion. */
 @media (prefers-reduced-motion: no-preference) { html { scroll-behavior: smooth; } }
+
+/* Related documents sit below the reader, as a shelf like the landing page's. */
+.related-docs { margin-top: 40px; padding-top: 28px; border-top: 1px solid var(--hairline); }
+.related-docs .shelf { grid-auto-columns: minmax(150px, 180px); }
+.related-docs .shelf-item span { font-size: 0.8rem; color: var(--muted); }
