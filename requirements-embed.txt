@@ -1,0 +1,3 @@
+# Only the machine that encodes passages needs these: the host's CPU encoder, with no PyTorch.
+onnxruntime==1.32.0
+tokenizers==0.23.3

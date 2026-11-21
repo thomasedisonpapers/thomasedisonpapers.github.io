@@ -297,6 +297,22 @@ def test_an_upload_without_embeddings_leaves_the_published_embeddings_in_place(t
     assert "embeddings/arctic-embed-s/related.json" in hub.files
 
 
+def test_an_upload_with_one_models_embeddings_leaves_another_models_in_place(tmp_path):
+    dataset = _dataset(tmp_path)
+    _embeddings(dataset)
+    hub = FakeHub(files={"embeddings/qwen3-embedding-0.6b/manifest.json": b"{}"})
+    upload.upload(dataset, "org/repo", hub)
+    assert "embeddings/qwen3-embedding-0.6b/manifest.json" in hub.files
+
+
+def test_an_upload_with_a_models_embeddings_removes_that_models_stale_parts(tmp_path):
+    dataset = _dataset(tmp_path)
+    _embeddings(dataset)
+    hub = FakeHub(files={"embeddings/arctic-embed-s/parts/part-00007.npy": b"old"})
+    upload.upload(dataset, "org/repo", hub)
+    assert "embeddings/arctic-embed-s/parts/part-00007.npy" not in hub.files
+
+
 def test_the_harvesters_files_are_never_removed(tmp_path):
     hub = FakeHub(files={"edisondigital/current.json": b"{}"})
     upload.upload(_dataset(tmp_path), "org/repo", hub)

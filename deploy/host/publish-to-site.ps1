@@ -43,8 +43,21 @@ try {
         "--bucket-uri", "file://./data/bucket", "--out", $Dataset, "--folders", $Folders,
         "--exports", "data/exports/new", "--site-url", $SiteUrl)
     $env:PYTHONPATH = $null
-    Invoke-Step "uploading" (Join-Path $Archive ".venv\Scripts\python.exe") @((Join-Path $Archive "builder\upload.py"),
-        "--dataset", $Dataset)
+    $archivePython = Join-Path $Archive ".venv\Scripts\python.exe"
+    $embed = Join-Path $Archive "builder\embed.py"
+    $store = Join-Path $Dataset "embeddings"
+    # Embedding is best effort: if it fails, the records still upload alongside the last complete vectors.
+    try {
+        Invoke-Step "planning embeddings" $archivePython @($embed, "plan", "--dataset", $Dataset, "--store", $store,
+            "--model", "arctic-embed-s", "--scope", "transcribed")
+        Invoke-Step "encoding new passages" $archivePython @($embed, "encode", "--store", $store, "--model", "arctic-embed-s",
+            "--backend", "onnx", "--batch", "16")
+        Invoke-Step "collecting embeddings" $archivePython @($embed, "collect", "--store", $store, "--model", "arctic-embed-s")
+        Invoke-Step "finding related documents" $archivePython @($embed, "related", "--store", $store, "--model", "arctic-embed-s")
+    } catch {
+        Write-Log "embedding skipped this run: $_"
+    }
+    Invoke-Step "uploading" $archivePython @((Join-Path $Archive "builder\upload.py"), "--dataset", $Dataset)
     Write-Log "done"
 } catch {
     Write-Log "FAILED: $_"

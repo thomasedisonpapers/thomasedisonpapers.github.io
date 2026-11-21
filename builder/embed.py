@@ -28,7 +28,9 @@ logger = logging.getLogger("embed")
 # The models we can embed with; the query side must use the same model, pooling and prefixes.
 MODELS = {
     "arctic-embed-s": {"hf": "Snowflake/snowflake-arctic-embed-s", "pooling": "cls", "dim": 384, "max_tokens": 512, "document_prefix": "",
-                       "query_prefix": "Represent this sentence for searching relevant passages: "},
+                       "query_prefix": "Represent this sentence for searching relevant passages: ",
+                       # Snowflake's own ONNX export, pinned so documents on the host and queries in the browser use the same weights.
+                       "onnx": {"revision": "e596f507467533e48a2e17c007f0e1dacc837b33", "file": "onnx/model.onnx"}},
     "qwen3-embedding-0.6b": {"hf": "Qwen/Qwen3-Embedding-0.6B", "pooling": "last", "dim": 1024, "max_tokens": 1024, "document_prefix": "",
                              "query_prefix": "Instruct: Given a search query, retrieve letters and documents from the Thomas A. Edison Papers that answer it\nQuery: "},
 }
@@ -166,6 +168,40 @@ def _plan(dataset: Path, root: Path, model: str, scope: str, chunk: int) -> dict
                "chunks": -(-len(todo) // chunk)}
     logger.info("planned %s", summary)
     return summary
+
+
+def load_onnx_encoder(model: str, batch: int = 32):
+    """The same encoder on ONNX Runtime and the tokenizers library, light enough for the host's CPU with no PyTorch."""
+    spec = MODELS[model]
+    if "onnx" not in spec:
+        raise EmbedError(f"{model} has no ONNX export; encode it on Amarel with PyTorch")
+    import onnxruntime
+    from huggingface_hub import hf_hub_download
+    from tokenizers import Tokenizer
+
+    revision, name = spec["onnx"]["revision"], spec["onnx"]["file"]
+    tokenizer = Tokenizer.from_file(hf_hub_download(spec["hf"], "tokenizer.json", revision=revision, token=False))
+    tokenizer.enable_truncation(max_length=spec["max_tokens"])
+    tokenizer.enable_padding(pad_id=tokenizer.token_to_id("[PAD]") or 0, pad_token="[PAD]")
+    session = onnxruntime.InferenceSession(hf_hub_download(spec["hf"], name, revision=revision, token=False),
+                                           providers=["CPUExecutionProvider"])
+    wanted = {i.name for i in session.get_inputs()}
+
+    def encode(texts: list[str]) -> np.ndarray:
+        out = np.zeros((len(texts), spec["dim"]), dtype=np.float32)
+        order = sorted(range(len(texts)), key=lambda i: -len(texts[i]))
+        for start in range(0, len(order), batch):
+            ids = order[start:start + batch]
+            encoded = tokenizer.encode_batch([texts[i] for i in ids])
+            feeds = {"input_ids": np.array([e.ids for e in encoded], dtype=np.int64),
+                     "attention_mask": np.array([e.attention_mask for e in encoded], dtype=np.int64),
+                     "token_type_ids": np.array([e.type_ids for e in encoded], dtype=np.int64)}
+            hidden = session.run(["last_hidden_state"], {k: v for k, v in feeds.items() if k in wanted})[0]
+            pooled = hidden[:, 0] if spec["pooling"] == "cls" else hidden[:, -1]
+            out[ids] = pooled / np.linalg.norm(pooled, axis=1, keepdims=True)
+        return out
+
+    return encode
 
 
 def load_encoder(model: str, device: str | None = None, batch: int = 64):
@@ -400,6 +436,8 @@ def main(argv=None) -> int:
     parser.add_argument("--scope", choices=["approved", "transcribed", "all"], default="approved")
     parser.add_argument("--chunk", type=int, help="encode only this chunk number (a Slurm array index)")
     parser.add_argument("--batch", type=int, default=64)
+    parser.add_argument("--backend", choices=["torch", "onnx"], default="torch",
+                        help="torch on Amarel's GPUs, onnx for the host's CPU with no PyTorch")
     parser.add_argument("--out", type=Path, help="where related writes its JSON")
     parser.add_argument("--queries", type=Path, help="a text file of evaluation queries, one per line")
     args = parser.parse_args(argv)
@@ -408,7 +446,9 @@ def main(argv=None) -> int:
         if args.step == "plan":
             print(json.dumps(plan(args.dataset, args.store, args.model, scope=args.scope)))
         elif args.step == "encode":
-            print(encode_chunks(args.store, args.model, load_encoder(args.model, batch=args.batch), only=args.chunk))
+            encoder = (load_onnx_encoder(args.model, batch=args.batch) if args.backend == "onnx"
+                       else load_encoder(args.model, batch=args.batch))
+            print(encode_chunks(args.store, args.model, encoder, only=args.chunk))
         elif args.step == "collect":
             print(json.dumps(collect(args.store, args.model)))
         elif args.step == "queries":

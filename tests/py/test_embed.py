@@ -277,3 +277,12 @@ def test_semantic_search_returns_no_hits_when_all_documents_are_withdrawn(tmp_pa
     _run(tmp_path, [])
 
     assert embed.search(tmp_path / "store" / MODEL, np.ones(DIM, dtype=np.float32)) == []
+
+
+def test_a_model_without_an_onnx_export_is_refused_for_the_host():
+    with pytest.raises(embed.EmbedError):
+        embed.load_onnx_encoder("qwen3-embedding-0.6b")
+
+
+def test_the_host_model_is_pinned_to_an_exact_revision():
+    assert len(embed.MODELS["arctic-embed-s"]["onnx"]["revision"]) == 40

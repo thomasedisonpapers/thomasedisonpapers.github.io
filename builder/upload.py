@@ -395,8 +395,8 @@ def _upload(dataset: Path, repo: str, api, *, dry_run: bool) -> dict:
     files = local_files(dataset)
     changed = [p for p in files if not POINTER.match(p) and not (p in remote and _same(files[p], remote[p]))]
     pointers = [p for p in files if POINTER.match(p) and not (p in remote and _same(files[p], remote[p]))]
-    # Only folders this machine actually publishes are kept in step, so a host without embeddings never deletes them.
-    managed = tuple(prefix for prefix in MANAGED if any(path.startswith(prefix) for path in files))
+    # Only what this machine publishes is kept in step: `local/`, and each embedding model it has, so Amarel's other models stay.
+    managed = tuple(sorted({"local/" if path.startswith("local/") else "/".join(path.split("/")[:2]) + "/" for path in files}))
     stale = sorted(p for p in remote if p.startswith(managed) and p not in files)
     manifest = "local/manifest.json"
     timestamp_only = (not changed and not stale and pointers == [manifest] and manifest in remote

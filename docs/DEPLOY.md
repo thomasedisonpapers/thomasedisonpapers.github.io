@@ -94,7 +94,15 @@ The host keeps the site in step with the review platform, with no change to the 
    2. `publish` writes `%USERPROFILE%\edison-site\dataset`:
       - exported folders (`data\exports\new`) are **Verified**;
       - everything else is **Under review by admin**.
-   3. `upload.py` sends whatever changed.
+   3. `embed.py` brings the arctic-embed-s vectors up to date for every transcribed document, drafts included:
+      - `plan` lists only new or changed passages;
+      - `encode --backend onnx` encodes them on the CPU, using Snowflake's ONNX export pinned to one revision. It needs
+        no PyTorch, and its vectors match Amarel's PyTorch ones to a cosine of 0.9999;
+      - `collect` folds them into the store, and `related` recomputes each document's related documents.
+
+      Embedding is best effort: if it fails, the records still upload alongside the last complete vectors.
+   4. `upload.py` sends whatever changed. It manages `local/` and each embedding model it has, so other models' vectors
+      (for example Qwen3, made on Amarel) are left alone.
 
    A run with nothing new uploads nothing. Logs are in `%USERPROFILE%\edison-site\logs`.
 2. **The deploy workflow** checks every 15 minutes whether the dataset's revision differs from the one the site serves,
@@ -105,7 +113,7 @@ The host keeps the site in step with the review platform, with no change to the 
      `git fetch X.bundle main:refs/heads/publisher`, followed by `git -C ..\edison-publisher merge --ff-only publisher`.
 4. **Setting it up:**
    1. clone this repository to `%USERPROFILE%\edison-archive`;
-   2. create its `.venv` and run `pip install -r requirements.txt`;
+   2. create its `.venv` and run `pip install -r requirements.txt -r requirements-embed.txt`;
    3. sign in with `.venv\Scripts\hf auth login`, using a fine-grained token that can write only to the dataset;
    4. run `deploy\host\install-publish-task.ps1`.
 5. **To pause it:** `Disable-ScheduledTask EdisonSitePublish`.
