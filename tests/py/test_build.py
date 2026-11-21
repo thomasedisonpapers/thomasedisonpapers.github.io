@@ -199,10 +199,33 @@ def test_a_build_that_loses_documents_is_refused(dataset):
         _build(dataset)
 
 
+def test_an_explicit_withdrawal_build_can_publish_an_empty_public_catalogue(dataset):
+    url = "https://huggingface.co/datasets/edison/archive/resolve/abc123/"
+    _build(dataset, dataset_url=url)
+    path = dataset / "dataset" / "local" / "manifest.json"
+    manifest = json.loads(path.read_text("utf-8"))
+    manifest["withdrawn"] = list(manifest["folders"]["E2002"]["documents"])
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    assert _build(dataset, dataset_url=url, allow_shrink=True)["documents"] == 0
+
+
 def test_a_page_pointing_at_a_missing_file_is_refused(dataset):
     (dataset / "dataset" / "local" / "E2002AAA" / "view" / "0001.jpg").unlink()
     with pytest.raises(build.BuildError):
         _build(dataset)
+
+
+@pytest.mark.parametrize("use_listing", [False, True])
+def test_a_record_pointing_at_a_missing_pdf_is_refused(dataset, use_listing):
+    source = dataset / "dataset"
+    record_path = source / "local" / "E2002AAA" / "record.json"
+    record = json.loads(record_path.read_text("utf-8"))
+    record["pdf"] = "E2002AAA.pdf"
+    record_path.write_text(json.dumps(record), encoding="utf-8")
+    listing = {path.relative_to(source).as_posix() for path in source.rglob("*") if path.is_file()}
+    with pytest.raises(build.BuildError, match="has no PDF file"):
+        _build(dataset, available=listing if use_listing else None)
 
 
 def test_an_unsafe_folder_id_is_refused(dataset):

@@ -16,21 +16,24 @@ $Log = Join-Path $Work ("logs\publish-" + (Get-Date -Format "yyyy-MM-dd") + ".lo
 
 function Write-Log([string]$Text) { "$(Get-Date -Format s) $Text" | Add-Content -Path $Log -Encoding UTF8 }
 
-# Runs one program with its output in the log; Start-Process keeps PowerShell 5.1 from turning stderr lines into errors.
+# Keep argument boundaries for paths containing spaces and use the program's exit code to detect failure.
 function Invoke-Step([string]$Name, [string]$Exe, [string[]]$Arguments) {
     Write-Log $Name
-    $out = Join-Path $Work "step.out"
-    $err = Join-Path $Work "step.err"
-    $run = Start-Process -FilePath $Exe -ArgumentList $Arguments -NoNewWindow -Wait -PassThru `
-        -RedirectStandardOutput $out -RedirectStandardError $err
-    Get-Content $out, $err -ErrorAction SilentlyContinue | Add-Content -Path $Log -Encoding UTF8
-    if ($run.ExitCode -ne 0) { throw "$Name failed with exit code $($run.ExitCode)" }
+    if (-not (Test-Path -LiteralPath $Exe -PathType Leaf)) { throw "$Exe not found" }
+    & {
+        $ErrorActionPreference = "Continue"
+        & $Exe @Arguments 2>&1
+    } | ForEach-Object { $_.ToString() } | Add-Content -LiteralPath $Log -Encoding UTF8
+    if ($LASTEXITCODE -ne 0) { throw "$Name failed with exit code $LASTEXITCODE" }
 }
 
 # One run at a time: the first publish of every folder takes far longer than the schedule's interval.
 $lock = New-Object System.Threading.Mutex($false, "Global\EdisonSitePublish")
-if (-not $lock.WaitOne(0)) { Write-Log "the previous run is still going; skipped"; exit 0 }
+$acquired = $false
 try {
+    try { $acquired = $lock.WaitOne(0) }
+    catch [System.Threading.AbandonedMutexException] { $acquired = $true }
+    if (-not $acquired) { Write-Log "the previous run is still going; skipped"; exit 0 }
     Set-Location $Pipeline
     $python = Join-Path $Pipeline ".venv\Scripts\python.exe"
     $env:PYTHONPATH = Join-Path $Publisher "src"
@@ -47,5 +50,6 @@ try {
     Write-Log "FAILED: $_"
     exit 1
 } finally {
-    $lock.ReleaseMutex()
+    if ($acquired) { $lock.ReleaseMutex() }
+    $lock.Dispose()
 }

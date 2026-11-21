@@ -356,6 +356,19 @@ def remote_files(api, repo: str, revision: str) -> dict:
             if hasattr(item, "blob_id")}
 
 
+def _same_public_manifest(path: Path, api, repo: str, revision: str) -> bool:
+    published_path = api.hf_hub_download(repo, "local/manifest.json", repo_type="dataset", revision=revision)
+    try:
+        local, published = read_json(path), read_json(Path(published_path))
+    except ValueError:
+        return False
+    if not isinstance(published, dict):
+        return False
+    local.pop("generated_at", None)
+    published.pop("generated_at", None)
+    return local == published
+
+
 def upload(dataset: Path, repo: str, api, *, dry_run: bool = False) -> dict:
     """Publishes from a private temporary copy so edits cannot bypass validation."""
     if dry_run:
@@ -382,7 +395,14 @@ def _upload(dataset: Path, repo: str, api, *, dry_run: bool) -> dict:
     files = local_files(dataset)
     changed = [p for p in files if not POINTER.match(p) and not (p in remote and _same(files[p], remote[p]))]
     pointers = [p for p in files if POINTER.match(p) and not (p in remote and _same(files[p], remote[p]))]
-    stale = sorted(p for p in remote if p.startswith(MANAGED) and p not in files)
+    # Only folders this machine actually publishes are kept in step, so a host without embeddings never deletes them.
+    managed = tuple(prefix for prefix in MANAGED if any(path.startswith(prefix) for path in files))
+    stale = sorted(p for p in remote if p.startswith(managed) and p not in files)
+    manifest = "local/manifest.json"
+    timestamp_only = (not changed and not stale and pointers == [manifest] and manifest in remote
+                      and _same_public_manifest(files[manifest], api, repo, info.sha))
+    if timestamp_only:
+        pointers = []
     plan = {"upload": len(changed), "manifests": len(pointers), "remove": len(stale), "files": len(files)}
     logger.info("plan: %s", plan)
     if dry_run:
@@ -397,8 +417,9 @@ def _upload(dataset: Path, repo: str, api, *, dry_run: bool) -> dict:
         commit = api.create_commit(repo, operations, repo_type="dataset", revision="main", parent_commit=info.sha,
                                    commit_message="Publish archive dataset")
         landed = remote_files(api, repo, commit.oid)
-    wrong = [p for p in files if p not in landed or not _same(files[p], landed[p])]
-    extra = [p for p in landed if p.startswith(MANAGED) and p not in files]
+    wrong = [p for p in files if not (timestamp_only and p == manifest)
+             and (p not in landed or not _same(files[p], landed[p]))]
+    extra = [p for p in landed if p.startswith(managed) and p not in files]
     if wrong or extra:
         raise UploadError(f"the repository does not match what was sent: {len(wrong)} wrong or missing, {len(extra)} extra "
                           f"(first: {(wrong + extra)[0]})")

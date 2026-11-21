@@ -81,6 +81,8 @@ host (`github.io`) in `web/` or `builder/`.
 5. **Withdrawals:** once the publisher has withdrawn a document, replan and collect any affected embedding store.
    Collection removes unreferenced vectors and clears stale related-document results. The next upload removes the
    withdrawn files from `main`. A takedown also needs the dataset history squashed (`HfApi().super_squash_history`).
+   If a planned withdrawal triggers the build's shrink guard, manually run **Deploy archive** from `main` with
+   **Allow the catalogue to shrink for a planned withdrawal** enabled.
 
 ## Publishing from the host
 

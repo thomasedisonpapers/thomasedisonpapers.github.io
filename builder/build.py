@@ -287,10 +287,15 @@ def build(dataset: Path, web: Path, out: Path, *, allow_shrink: bool = False, da
     # A withdrawal removes the document whichever source it came from, the edisondigital mirror included.
     for document_id in manifest.get("withdrawn", []):
         records.pop(document_id, None)
-    if dataset_url and not records:
+    if dataset_url and not records and not (allow_shrink and manifest.get("withdrawn")):
         raise BuildError("the public dataset contains no documents")
     if conflicts:
         raise BuildError(f"DocIDs used by a new document and a different edisondigital item: {', '.join(conflicts[:10])}")
+    def has_file(path: str) -> bool:
+        if path.startswith(("http://", "https://")):
+            return True
+        return path in available if available is not None else (dataset / path).is_file()
+
     for record in records.values():
         safe_id(record["id"])
         folder_id = (record.get("folder") or {}).get("id", "")
@@ -299,9 +304,10 @@ def build(dataset: Path, web: Path, out: Path, *, allow_shrink: bool = False, da
         for page in record.get("pages", []):
             for size in ("thumb", "view", "full"):
                 path = page[size]
-                present = path in available if available is not None else (dataset / path).exists()
-                if not str(path).startswith("http") and not present:
+                if not has_file(path):
                     raise BuildError(f"{record['id']} page {page.get('n')} has no {size} file at {path}")
+        if record.get("pdf") and not has_file(record["pdf"]):
+            raise BuildError(f"{record['id']} has no PDF file at {record['pdf']}")
 
     previous_pointer = out / "data" / "current.json"
     previous = read_json(previous_pointer) if previous_pointer.exists() else {}

@@ -291,6 +291,12 @@ def test_a_concurrent_commit_prevents_replacing_the_revision_that_was_checked(tm
     assert hub.commits == []
 
 
+def test_an_upload_without_embeddings_leaves_the_published_embeddings_in_place(tmp_path):
+    hub = FakeHub(files={"embeddings/arctic-embed-s/related.json": b"{}"})
+    upload.upload(_dataset(tmp_path), "org/repo", hub)
+    assert "embeddings/arctic-embed-s/related.json" in hub.files
+
+
 def test_the_harvesters_files_are_never_removed(tmp_path):
     hub = FakeHub(files={"edisondigital/current.json": b"{}"})
     upload.upload(_dataset(tmp_path), "org/repo", hub)
@@ -304,6 +310,31 @@ def test_a_second_upload_with_nothing_changed_makes_no_commits(tmp_path):
     hub.commits.clear()
     upload.upload(dataset, "org/repo", hub)
     assert hub.commits == []
+
+
+@pytest.mark.parametrize("aliases,expected_commits", [({}, 0), ({"E2002OLD": "E2002AAA"}, 1)])
+def test_a_manifest_timestamp_is_ignored_when_the_published_contents_are_unchanged(
+        tmp_path, monkeypatch, aliases, expected_commits):
+    dataset = _dataset(tmp_path)
+    hub = FakeHub()
+    manifest_path = dataset / "local" / "manifest.json"
+    before = json.loads(manifest_path.read_text(encoding="utf-8"))
+    before.update(generated_at="2026-11-21T15:00:00Z", aliases={})
+    manifest_path.write_text(json.dumps(before), encoding="utf-8")
+    upload.upload(dataset, "org/repo", hub)
+    hub.commits.clear()
+    cached = tmp_path / "remote-manifest.json"
+    cached.write_bytes(hub.files["local/manifest.json"])
+
+    def download(repo, filename, *, repo_type, revision):
+        assert revision == hub.oid
+        return str(cached)
+
+    monkeypatch.setattr(hub, "hf_hub_download", download, raising=False)
+    before.update(generated_at="2026-11-21T15:15:00Z", aliases=aliases)
+    manifest_path.write_text(json.dumps(before), encoding="utf-8")
+    upload.upload(dataset, "org/repo", hub)
+    assert len(hub.commits) == expected_commits
 
 
 def test_a_file_that_did_not_land_fails_the_verification(tmp_path):

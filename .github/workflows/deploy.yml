@@ -6,6 +6,11 @@ on:
   repository_dispatch:
     types: [archive-published, archive-harvested]
   workflow_dispatch:
+    inputs:
+      allow_shrink:
+        description: Allow the catalogue to shrink for a planned withdrawal
+        type: boolean
+        default: false
   # The host publishes every 15 minutes, so the site checks as often and rebuilds only when the dataset has changed.
   schedule:
     - cron: "7,22,37,52 * * * *"
@@ -32,15 +37,20 @@ jobs:
         id: pages
       - name: Compare the dataset with the revision the site serves
         id: compare
+        shell: bash
         env:
           EVENT: ${{ github.event_name }}
           HF_DATASET_REPO: ${{ vars.HF_DATASET_REPO }}
           PAGES_URL: ${{ steps.pages.outputs.base_url }}
         run: |
           if [ "$EVENT" != "schedule" ]; then echo "changed=true" >> "$GITHUB_OUTPUT"; exit 0; fi
-          live=$(curl --silent --show-error --location --retry 2 --max-time 30 --header 'Cache-Control: no-cache'             "${PAGES_URL%/}/sources.json" | python3 -c 'import json, re, sys; m = re.search(r"/resolve/([0-9a-f]{40})/", json.load(sys.stdin)["dataset"][0]); print(m.group(1) if m else "")' || true)
-          latest=$(curl --silent --show-error --fail --retry 2 --max-time 30             "https://huggingface.co/api/datasets/$HF_DATASET_REPO" | python3 -c 'import json, sys; print(json.load(sys.stdin)["sha"])')
-          echo "The site serves ${live:-nothing yet}; the dataset is at $latest."
+          live=$(curl --silent --show-error --fail --location --retry 2 --max-time 30 \
+            --header 'Cache-Control: no-cache' "${PAGES_URL%/}/sources.json" |
+            python3 -c 'import json, sys; print(json.load(sys.stdin)["dataset"][0])' || true)
+          latest=$(curl --silent --show-error --fail --retry 2 --max-time 30 \
+            "https://huggingface.co/api/datasets/$HF_DATASET_REPO" |
+            python3 -c 'import json, sys; data = json.load(sys.stdin); print("https://huggingface.co/datasets/{id}/resolve/{sha}/".format(**data))')
+          echo "The site serves ${live:-nothing yet}; the latest dataset URL is $latest."
           if [ "$live" = "$latest" ]; then echo "changed=false" >> "$GITHUB_OUTPUT"; else echo "changed=true" >> "$GITHUB_OUTPUT"; fi
 
   build:
@@ -81,13 +91,17 @@ jobs:
             *) echo "Could not read the live archive counts (HTTP $status)." >&2; exit 1 ;;
           esac
       - name: Build the public site
+        shell: bash
         env:
           HF_DATASET_REPO: ${{ vars.HF_DATASET_REPO }}
           PAGES_URL: ${{ steps.pages.outputs.base_url }}
+          ALLOW_SHRINK: ${{ github.event_name == 'workflow_dispatch' && inputs.allow_shrink }}
         run: |
           : "${HF_DATASET_REPO:?Set the HF_DATASET_REPO repository variable to the public Hugging Face dataset ID}"
+          options=()
+          if [ "$ALLOW_SHRINK" = "true" ]; then options+=(--allow-shrink); fi
           python builder/build.py --hf-repo "$HF_DATASET_REPO" --dataset out/hf-cache --out out/site \
-            --previous-site "$PAGES_URL"
+            --previous-site "$PAGES_URL" "${options[@]}"
       - uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4.0.0
         with:
           path: out/site
