@@ -279,8 +279,8 @@ def restore_assets(out: Path, previous: dict, current: str, site_url: str) -> No
 
 
 def build(dataset: Path, web: Path, out: Path, *, allow_shrink: bool = False, dataset_url: str | None = None,
-          previous_site: str | None = None) -> dict:
-    """Writes the site (copied from `web`) and its data to `out`; raises BuildError rather than publish a bad build."""
+          previous_site: str | None = None, available: set[str] | None = None) -> dict:
+    """Writes the site and its data to `out`, checking page files against `available` (the dataset's listing) when given, and raises BuildError rather than publish a bad build."""
     local, manifest = load_local(dataset)
     remote = load_edisondigital(dataset)
     records, conflicts = merge(local, remote)
@@ -299,7 +299,8 @@ def build(dataset: Path, web: Path, out: Path, *, allow_shrink: bool = False, da
         for page in record.get("pages", []):
             for size in ("thumb", "view", "full"):
                 path = page[size]
-                if not str(path).startswith("http") and not (dataset / path).exists():
+                present = path in available if available is not None else (dataset / path).exists()
+                if not str(path).startswith("http") and not present:
                     raise BuildError(f"{record['id']} page {page.get('n')} has no {size} file at {path}")
 
     previous_pointer = out / "data" / "current.json"
@@ -430,16 +431,38 @@ def build(dataset: Path, web: Path, out: Path, *, allow_shrink: bool = False, da
     return pointer
 
 
-def download_public_dataset(repo: str, cache: Path) -> tuple[Path, str]:
-    """Uses the same immutable public dataset revision for the build and browser downloads."""
+# What the build reads; scans, viewer images and PDFs stay on Hugging Face and are checked against the file listing instead.
+RECORD_PATTERNS = ["local/manifest.json", "local/*/record.json", "edisondigital/current.json", "edisondigital/*/records.jsonl"]
+
+
+def first_thumbnails(dataset: Path, listing: set[str]) -> list[str]:
+    """Each document's first-page thumbnail in the dataset, the only image the build reads (to make the site's own thumbnail)."""
+    local, _ = load_local(dataset)
+    paths = []
+    for record in [*local.values(), *load_edisondigital(dataset).values()]:
+        pages = record.get("pages") or []
+        thumb = str(pages[0].get("thumb", "")) if pages else ""
+        if thumb and not thumb.startswith("http") and thumb in listing:
+            paths.append(thumb)
+    return sorted(set(paths))
+
+
+def download_public_dataset(repo: str, cache: Path) -> tuple[Path, str, set[str]]:
+    """Uses the same immutable public dataset revision for the build and browser downloads, fetching records and first thumbnails only."""
     from huggingface_hub import HfApi, snapshot_download
 
-    info = HfApi().dataset_info(repo, token=False)
+    api = HfApi()
+    info = api.dataset_info(repo, token=False)
     if info.private or info.gated or not info.sha:
         raise BuildError("Pages needs a public, ungated Hugging Face dataset with a published revision")
-    directory = snapshot_download(info.id, repo_type="dataset", revision=info.sha, cache_dir=cache, token=False,
-                                  allow_patterns=["local/**", "edisondigital/**"], ignore_patterns=["edisondigital/work/**"])
-    return Path(directory), f"https://huggingface.co/datasets/{info.id}/resolve/{info.sha}/"
+    listing = set(api.list_repo_files(info.id, repo_type="dataset", revision=info.sha, token=False))
+    fetch = dict(repo_type="dataset", revision=info.sha, cache_dir=cache, token=False)
+    directory = Path(snapshot_download(info.id, allow_patterns=RECORD_PATTERNS, **fetch))
+    thumbs = first_thumbnails(directory, listing)
+    if thumbs:
+        snapshot_download(info.id, allow_patterns=thumbs, **fetch)
+    logger.info("downloaded the records and %d first thumbnails of %d files", len(thumbs), len(listing))
+    return directory, f"https://huggingface.co/datasets/{info.id}/resolve/{info.sha}/", listing
 
 
 def main(argv=None) -> int:
@@ -455,10 +478,11 @@ def main(argv=None) -> int:
     try:
         dataset = Path(args.dataset)
         dataset_url = None
+        available = None
         if args.hf_repo:
-            dataset, dataset_url = download_public_dataset(args.hf_repo, dataset)
+            dataset, dataset_url, available = download_public_dataset(args.hf_repo, dataset)
         build(dataset, Path(args.web), Path(args.out), allow_shrink=args.allow_shrink, dataset_url=dataset_url,
-              previous_site=args.previous_site)
+              previous_site=args.previous_site, available=available)
     except BuildError as exc:
         logger.error("build refused: %s", exc)
         return 1

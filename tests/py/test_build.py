@@ -269,3 +269,48 @@ def test_a_record_whose_id_differs_from_its_folder_name_is_refused(dataset):
     record_path.write_text(json.dumps(record), "utf-8")
     with pytest.raises(build.BuildError):
         _build(dataset)
+
+
+def _listing(tmp):
+    root = tmp / "dataset"
+    return {p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file()}
+
+
+def test_a_build_from_the_file_listing_needs_no_scans_on_disk(dataset):
+    listing = _listing(dataset)
+    for scan in [*(dataset / "dataset").rglob("full/*.jpg"), *(dataset / "dataset").rglob("view/*.jpg")]:
+        scan.unlink()
+    assert _build(dataset, available=listing)["documents"] == 3
+
+
+def test_a_page_missing_from_the_file_listing_is_refused(dataset):
+    listing = _listing(dataset) - {"local/E2002AAB/full/0001.jpg"}
+    with pytest.raises(build.BuildError):
+        _build(dataset, available=listing)
+
+
+def test_only_each_documents_first_thumbnail_is_downloaded(dataset):
+    assert build.first_thumbnails(dataset / "dataset", _listing(dataset)) == [
+        f"local/E2002AA{c}/thumb/0001.jpg" for c in "ABC"]
+
+
+def test_the_deploy_downloads_records_and_first_thumbnails_but_no_scans(dataset, monkeypatch):
+    import huggingface_hub
+    asked = []
+    listing = sorted(_listing(dataset))
+
+    class FakeApi:
+        def dataset_info(self, repo, token):
+            return type("Info", (), {"id": repo, "sha": "abc123", "private": False, "gated": False})()
+
+        def list_repo_files(self, repo, repo_type, revision, token):
+            return listing
+
+    def fake_snapshot(repo, allow_patterns, **options):
+        asked.extend(allow_patterns)
+        return str(dataset / "dataset")
+
+    monkeypatch.setattr(huggingface_hub, "HfApi", FakeApi)
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", fake_snapshot)
+    build.download_public_dataset("org/repo", dataset / "cache")
+    assert not [p for p in asked if "/view/" in p or "/full/" in p or p.endswith((".pdf", "**"))]
