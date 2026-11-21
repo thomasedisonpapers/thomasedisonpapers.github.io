@@ -82,6 +82,34 @@ host (`github.io`) in `web/` or `builder/`.
    Collection removes unreferenced vectors and clears stale related-document results. The next upload removes the
    withdrawn files from `main`. A takedown also needs the dataset history squashed (`HfApi().super_squash_history`).
 
+## Publishing from the host
+
+The host keeps the site in step with the review platform, with no change to the review server itself:
+
+1. **The scheduled task `EdisonSitePublish`** runs `deploy\host\publish-to-site.ps1` every 15 minutes:
+   1. `public-folders` lists every folder with a drafted document, in both workflows, leaving out test folders. It
+      reads the database read-only.
+   2. `publish` writes `%USERPROFILE%\edison-site\dataset`:
+      - exported folders (`data\exports\new`) are **Verified**;
+      - everything else is **Under review by admin**.
+   3. `upload.py` sends whatever changed.
+
+   A run with nothing new uploads nothing. Logs are in `%USERPROFILE%\edison-site\logs`.
+2. **The deploy workflow** checks every 15 minutes whether the dataset's revision differs from the one the site serves,
+   and rebuilds only then. An edit, an acceptance or an export therefore reaches the site within about half an hour.
+3. **The publisher's code** runs from `%USERPROFILE%\edison-publisher`, a git worktree of edison-pipeline on the
+   `publisher` branch, so the review server's own checkout never changes.
+   - To update it, deliver a bundle (`git bundle create X.bundle <old>..main`), then on the host:
+     `git fetch X.bundle main:refs/heads/publisher`, followed by `git -C ..\edison-publisher merge --ff-only publisher`.
+4. **Setting it up:**
+   1. clone this repository to `%USERPROFILE%\edison-archive`;
+   2. create its `.venv` and run `pip install -r requirements.txt`;
+   3. sign in with `.venv\Scripts\hf auth login`, using a fine-grained token that can write only to the dataset;
+   4. run `deploy\host\install-publish-task.ps1`.
+5. **To pause it:** `Disable-ScheduledTask EdisonSitePublish`.
+6. **GitHub turns scheduled workflows off** in a public repository after 60 days without a commit. If that happens,
+   re-enable it on the Actions tab.
+
 ## 3. Moving to a domain later
 
 Nothing in the site's code changes; these are settings only.
