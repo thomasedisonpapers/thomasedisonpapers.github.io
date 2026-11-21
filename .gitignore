@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+.pytest_cache/
+node_modules/
+out/
+.env
+*.log
+# Editor and assistant settings for one machine, with local paths.
+.claude/

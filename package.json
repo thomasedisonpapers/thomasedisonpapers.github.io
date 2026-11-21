@@ -1,0 +1,11 @@
+{
+  "name": "edison-archive",
+  "private": true,
+  "description": "Public archive site for the Thomas A. Edison Papers",
+  "scripts": {
+    "test": "node scripts/check.mjs",
+    "test:js": "node --test \"tests/js/**/*.test.js\"",
+    "hooks": "git config core.hooksPath .githooks"
+  },
+  "type": "module"
+}

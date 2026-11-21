@@ -1,0 +1,76 @@
+name: Deploy archive
+
+on:
+  push:
+    branches: [main]
+  repository_dispatch:
+    types: [archive-published, archive-harvested]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: archive-pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    # Nothing is deployed until the public dataset is named, so pushes before the first upload only run the tests.
+    if: github.ref_name == github.event.repository.default_branch && vars.HF_DATASET_REPO != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      pages: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+      - run: python -m pip install -r requirements.txt
+      - run: node scripts/check.mjs
+        env:
+          PYTHON: python
+      - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5.0.0
+        id: pages
+      - name: Load the live document counts
+        env:
+          PAGES_URL: ${{ steps.pages.outputs.base_url }}
+        run: |
+          status=$(curl --silent --show-error --location --retry 2 --max-time 30 \
+            --output "$RUNNER_TEMP/archive-current.json" --write-out '%{http_code}' \
+            --header 'Cache-Control: no-cache' "${PAGES_URL%/}/data/current.json")
+          case "$status" in
+            200)
+              mkdir -p out/site/data
+              cp "$RUNNER_TEMP/archive-current.json" out/site/data/current.json
+              ;;
+            404) ;;
+            *) echo "Could not read the live archive counts (HTTP $status)." >&2; exit 1 ;;
+          esac
+      - name: Build the public site
+        env:
+          HF_DATASET_REPO: ${{ vars.HF_DATASET_REPO }}
+        run: |
+          : "${HF_DATASET_REPO:?Set the HF_DATASET_REPO repository variable to the public Hugging Face dataset ID}"
+          python builder/build.py --hf-repo "$HF_DATASET_REPO" --dataset out/hf-cache --out out/site
+      - uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4.0.0
+        with:
+          path: out/site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4.0.5
+        id: deployment

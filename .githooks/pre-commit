@@ -1,0 +1,3 @@
+#!/bin/sh
+# Every commit must pass the full gate; a change that breaks an earlier test is not a safe change.
+exec node scripts/check.mjs

@@ -1,0 +1,11 @@
+# Pinned actions and packages never move on their own, so Dependabot proposes each update as a reviewable pull request.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly

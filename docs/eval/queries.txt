@@ -1,0 +1,17 @@
+# Evaluation queries for semantic search, one per line; they describe meaning rather than repeat a document's words.
+letters about hearing loss
+people asking Edison how to become an inventor
+advice to young men starting a career
+requests to buy books and magazines
+someone offering Edison a business idea
+houses built from poured concrete
+flying machines and airplanes
+electric cars and their batteries
+storage battery problems
+a machine that stamps numbers on documents
+plastic records and the condensite company
+articles written about Edison in newspapers
+does Edison think college education is necessary
+fans asking for an autograph or photograph
+complaints about a product that stopped working
+west orange lab

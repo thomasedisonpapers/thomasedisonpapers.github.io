@@ -1,0 +1,12 @@
+[
+  {"text": "Edison & Co.", "terms": ["edison", "co"]},
+  {"text": "Smith &co., New York", "terms": ["smith", "co", "new", "york"]},
+  {"text": "Édison's PHONOGRAPH", "terms": ["edison", "phonograph"]},
+  {"text": "a 6% loan, No. 5", "terms": ["6", "loan", "no", "5"]},
+  {"text": "X018C9-0915", "terms": ["x018c9", "0915"]},
+  {"text": "  1880–1885  ", "terms": ["1880", "1885"]},
+  {"text": "Straße, Ætna & Œuvre", "terms": ["strasse", "aetna", "oeuvre"]},
+  {"text": "Edison’s “lamp”", "terms": ["edison", "lamp"]},
+  {"text": "aःb", "terms": ["ab"]},
+  {"text": "", "terms": []}
+]
