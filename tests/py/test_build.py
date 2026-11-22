@@ -92,6 +92,12 @@ def test_a_topic_limited_to_a_field_ignores_other_fields():
     assert not build.topic_matches({"any": ["mina"], "fields": ["author"]}, terms)
 
 
+def test_a_topic_counts_a_document_that_uses_only_a_variant_spelling_regression_phonograph_314_vs_317_21_november():
+    terms = textindex.document_terms({"text": "the new phono records"})
+    variants = textindex.variant_map({"phono": ["phonograph"]})
+    assert build.topic_matches({"any": ["phonograph"]}, terms, variants)
+
+
 @pytest.fixture
 def dataset(tmp_path):
     root = tmp_path / "dataset" / "local"

@@ -270,18 +270,21 @@ def folder_description(records: list[dict]) -> str:
     return f"{len(records)} document{'s' if len(records) != 1 else ''}{span}{listed}."
 
 
-def topic_matches(topic: dict, terms: dict[str, int]) -> bool:
+def topic_matches(topic: dict, terms: dict[str, int], variants: dict[str, list[str]] | None = None) -> bool:
     mask = 0
     for name in topic.get("fields") or []:
         mask |= textindex.FIELDS[name]
     for phrase in topic.get("any", []):
-        # The same rule as the site's phrase search, common words left out.
-        keys = textindex.phrase_keys(textindex.tokenize(phrase))
-        found = mask or ~0
-        for key in keys:
-            found &= terms.get(key, 0)
-        if keys and found:
-            return True
+        # The topic page searches each word with its variants (phonograph also finds phono), so the count must too.
+        words = textindex.tokenize(phrase)
+        for wording in [words, *(textindex.tokenize(v) for v in (variants or {}).get(" ".join(words), []))]:
+            # The same rule as the site's phrase search, common words left out.
+            keys = textindex.phrase_keys(wording)
+            found = mask or ~0
+            for key in keys:
+                found &= terms.get(key, 0)
+            if keys and found:
+                return True
     return False
 
 
@@ -453,10 +456,11 @@ def build(dataset: Path, web: Path, out: Path, *, allow_shrink: bool = False, da
             last_seen[term] = ordinal
     for shard, postings in shards.items():
         write_json(site_data / "index" / f"{shard}.json", postings)
+    variants = textindex.variant_map(synonyms)
     write_json(site_data / "index" / "meta.json", {"schema": SCHEMA, "documents": len(summaries), "fields": textindex.FIELDS,
                                                    "weights": textindex.WEIGHTS, "shards": sorted(shards),
                                                    "stopwords": sorted(textindex.STOPWORDS), "pair_shards": textindex.PAIR_SHARDS,
-                                                   "stemmer": "porter-1980", "synonyms": textindex.variant_map(synonyms),
+                                                   "stemmer": "porter-1980", "synonyms": variants,
                                                    "per_file": SUMMARIES_PER_FILE})
 
     ordinal_of_id = {s["id"]: n for n, s in enumerate(summaries)}
@@ -492,7 +496,7 @@ def build(dataset: Path, web: Path, out: Path, *, allow_shrink: bool = False, da
     ordinal_of = {s["id"]: n for n, s in enumerate(summaries)}
     topic_list = []
     for topic in topics:
-        matched = [n for n, terms in enumerate(terms_by_doc) if topic_matches(topic, terms)]
+        matched = [n for n, terms in enumerate(terms_by_doc) if topic_matches(topic, terms, variants)]
         cover = topic.get("cover") if topic.get("cover") in ordinal_of else None
         if cover is None and matched:
             cover = next((summaries[n]["id"] for n in matched if summaries[n]["status"] == "approved" and summaries[n]["thumb"]),
