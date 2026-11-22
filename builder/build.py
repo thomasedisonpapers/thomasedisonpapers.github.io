@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import json
 import logging
+import os
 import re
 import shutil
 import sys
@@ -16,6 +17,7 @@ from pathlib import Path, PurePosixPath
 
 from PIL import Image
 
+import describe
 import textindex
 
 logger = logging.getLogger("build")
@@ -261,6 +263,52 @@ def summary(record: dict, thumb: str | None) -> dict:
             "ratio": round((first.get("height") or 4) / (first.get("width") or 3), 3), "pages": len(record.get("pages") or [])}
 
 
+def shared_scans(records: dict) -> list[dict]:
+    """Groups of documents that show the same page scan, with whether each group's documents show exactly the same pages."""
+    owners: dict[str, set[str]] = defaultdict(set)
+    for record in records.values():
+        for page in record.get("pages") or []:
+            if page.get("sha256"):
+                owners[page["sha256"]].add(record["id"])
+    # Documents joined through any shared page form one group, so a page range that swallows several neighbours is reported once.
+    parent: dict[str, str] = {}
+
+    def root(document_id: str) -> str:
+        while parent.setdefault(document_id, document_id) != document_id:
+            parent[document_id] = parent[parent[document_id]]
+            document_id = parent[document_id]
+        return document_id
+
+    for ids in owners.values():
+        first, *rest = sorted(ids)
+        for other in rest:
+            parent[root(other)] = root(first)
+    groups: dict[str, list[str]] = defaultdict(list)
+    for document_id in parent:
+        groups[root(document_id)].append(document_id)
+    return [{"documents": sorted(members),
+             "identical": len({tuple(p.get("sha256") for p in records[m].get("pages") or []) for m in members}) == 1}
+            for members in sorted(groups.values(), key=min) if len(members) > 1]
+
+
+def report_shared_scans(groups: list[dict]) -> None:
+    """Warns about documents sharing a scan, which the build cannot fix: their page ranges are set in the review platform."""
+    if not groups:
+        return
+    count = sum(len(g["documents"]) for g in groups)
+    logger.warning("%d documents in %d groups share a page scan with another document; check their page ranges in the review platform",
+                   count, len(groups))
+    lines = [f"{', '.join(g['documents'])}{' (the same pages)' if g['identical'] else ''}" for g in groups]
+    for line in lines:
+        logger.warning("shared scan: %s", line)
+    summary_file = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary_file:
+        # The run's summary page is where an editor will see this, not the log.
+        with open(summary_file, "a", encoding="utf-8") as handle:
+            handle.write(f"### {count} documents share a page scan\n\nCheck these page ranges in the review platform.\n\n"
+                         + "".join(f"- {line}\n" for line in lines) + "\n")
+
+
 def folder_description(records: list[dict]) -> str:
     """A plain account of what the folder holds, for folders the archive has not described."""
     years = sorted(y for y in (r.get("year") for r in records) if y)
@@ -401,6 +449,8 @@ def build(dataset: Path, web: Path, out: Path, *, allow_shrink: bool = False, da
                     raise BuildError(f"{record['id']} page {page.get('n')} has no {size} file at {path}")
         if record.get("pdf") and not has_file(record["pdf"]):
             raise BuildError(f"{record['id']} has no PDF file at {record['pdf']}")
+        record["description"] = describe.describe(record)
+    report_shared_scans(shared_scans(records))
 
     previous_pointer = out / "data" / "current.json"
     previous = read_json(previous_pointer) if previous_pointer.exists() else {}

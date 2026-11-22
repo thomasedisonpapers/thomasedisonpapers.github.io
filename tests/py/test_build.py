@@ -98,6 +98,25 @@ def test_a_topic_counts_a_document_that_uses_only_a_variant_spelling_regression_
     assert build.topic_matches({"any": ["phonograph"]}, terms, variants)
 
 
+def scanned(document_id, *hashes):
+    return {"id": document_id, "pages": [{"sha256": h} for h in hashes]}
+
+
+def test_two_documents_showing_the_same_scan_are_reported_as_the_same_pages_regression_ce85002_ce85003_22_november():
+    records = {r["id"]: r for r in [scanned("CE85002", "a"), scanned("CE85003", "a"), scanned("CE85004", "b")]}
+    assert build.shared_scans(records) == [{"documents": ["CE85002", "CE85003"], "identical": True}]
+
+
+def test_a_page_range_that_swallows_its_neighbours_is_reported_as_one_group():
+    records = {r["id"]: r for r in [scanned("E2037AAA", "a", "b", "c"), scanned("E2037AAB", "b"), scanned("E2037AAC", "c")]}
+    assert build.shared_scans(records) == [{"documents": ["E2037AAA", "E2037AAB", "E2037AAC"], "identical": False}]
+
+
+def test_pages_without_a_hash_are_never_reported_as_shared():
+    records = {r["id"]: r for r in [{"id": "A1", "pages": [{}]}, {"id": "A2", "pages": [{}]}]}
+    assert build.shared_scans(records) == []
+
+
 @pytest.fixture
 def dataset(tmp_path):
     root = tmp_path / "dataset" / "local"
