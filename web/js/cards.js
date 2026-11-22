@@ -18,7 +18,7 @@ export function folderEntry(f, base) {
 }
 
 // `title` and `description` may arrive already highlighted (escaped, with <mark>); otherwise they are escaped here.
-export function documentEntry(s, base, { title = null, description = null, matched = "", collection = true } = {}) {
+export function documentEntry(s, base, { title = null, description = null, matched = "", collection = true, byMeaning = false } = {}) {
   const href = `document.html?id=${encodeURIComponent(s.id)}`;
   return `<article class="item">
     <a href="${href}" tabindex="-1" aria-hidden="true">${thumbHtml(s, base, { alt: "" })}</a>
@@ -26,7 +26,8 @@ export function documentEntry(s, base, { title = null, description = null, match
       ${s.description || description ? `<p class="item-desc">${description ?? esc(s.description)}</p>` : ""}
       ${facts(s, { collection })}
       <div class="item-foot">${badge(s.status)}<span>${esc(s.id)}</span>${s.pages ? `<span>${plural(s.pages, "page")}</span>` : ""}
-        ${matched ? `<span>Matched in ${esc(matched)}</span>` : ""}</div></div></article>`;
+        ${matched ? `<span>Matched in ${esc(matched)}</span>` : ""}
+        ${byMeaning ? `<span class="by-meaning" title="None of your words appear here, but it is about the same thing">${icon("sparkles")}Matched by meaning</span>` : ""}</div></div></article>`;
 }
 
 /** A row of documents related by meaning, each a thumbnail with its title, date and status, linking to the document. */

@@ -542,3 +542,17 @@ body.focus-mode .reader { height: 100dvh; border: 0; border-radius: 0; box-shado
 .related-docs { margin-top: 40px; padding-top: 28px; border-top: 1px solid var(--hairline); }
 .related-docs .shelf { grid-auto-columns: minmax(150px, 180px); }
 .related-docs .shelf-item span { font-size: 0.8rem; color: var(--muted); }
+
+/* The "Search by meaning" switch: a labelled checkbox drawn as a sliding switch, keyboard and screen-reader friendly. */
+.switch { display: inline-flex; align-items: center; gap: 8px; font-size: 0.86rem; color: var(--text-2); cursor: pointer; position: relative; }
+.switch input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+.switch .track { width: 32px; height: 18px; border-radius: 999px; background: var(--hairline); position: relative; flex: none;
+  transition: background var(--quick) var(--ease); }
+.switch .track::after { content: ""; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25); transition: transform var(--quick) var(--ease); }
+.switch input:checked + .track { background: var(--button); }
+.switch input:checked + .track::after { transform: translateX(14px); }
+.switch input:focus-visible + .track { outline: 2px solid var(--focus); outline-offset: 2px; }
+.meaning-status { color: var(--muted); }
+.by-meaning { display: inline-flex; align-items: center; gap: 4px; color: var(--accent); font-weight: 500; }
+.by-meaning .icon { width: 14px; height: 14px; }

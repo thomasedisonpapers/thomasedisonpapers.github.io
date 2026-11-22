@@ -165,6 +165,9 @@ def test_a_public_build_serves_page_files_from_its_dataset_revision(dataset):
 
 def test_a_fresh_public_build_keeps_the_asset_urls_from_the_previous_html(dataset, monkeypatch):
     source = "https://huggingface.co/datasets/edison/archive/resolve/abc123/"
+    vendor = dataset / "web" / "vendor"
+    vendor.mkdir()
+    (vendor / "runtime.mjs").write_text("// previous runtime", "utf-8")
     previous = _build(dataset, dataset_url=source)
     revision = previous["asset_revision"]
     archive = dataset / "site" / "asset-bundles" / f"{revision}.zip"
@@ -178,7 +181,11 @@ def test_a_fresh_public_build_keeps_the_asset_urls_from_the_previous_html(datase
     (dataset / "web" / "js" / "home.js").write_text("// updated home", "utf-8")
     build.build(dataset / "dataset", dataset / "web", out, dataset_url=source, previous_site="https://example.test")
 
-    assert (out / "assets" / revision / "js" / "home.js").read_text("utf-8") == "// home"
+    old_assets = out / "assets" / revision
+    assets = ("js/home.js", "vendor/runtime.mjs")
+    assert {name: (old_assets / name).read_text("utf-8") for name in assets} == {
+        "js/home.js": "// home", "vendor/runtime.mjs": "// previous runtime",
+    }
 
 
 def test_a_withdrawn_document_is_left_out(dataset):
@@ -374,6 +381,13 @@ def test_the_stronger_models_related_documents_are_preferred(dataset):
     assert _related_of(dataset, "E2002AAA") == [_ordinal(dataset, "E2002AAC")]
 
 
+def test_a_document_missing_from_the_preferred_model_uses_the_other_model(dataset):
+    _related(dataset, "arctic-embed-s", {"E2002AAA": [["E2002AAB", 0.9]]})
+    _related(dataset, "qwen3-embedding-0.6b", {"E2002AAC": [["E2002AAB", 0.9]]})
+    _build(dataset)
+    assert _related_of(dataset, "E2002AAA") == [_ordinal(dataset, "E2002AAB")]
+
+
 def test_a_build_without_embeddings_lists_no_related_documents(dataset):
     _build(dataset)
     assert _related_of(dataset, "E2002AAA") is None
@@ -382,3 +396,60 @@ def test_a_build_without_embeddings_lists_no_related_documents(dataset):
 def test_no_more_than_six_related_documents_are_listed():
     ids = {f"D{n}": n for n in range(10)}
     assert len(build.related_ordinals("D0", {"D0": list(ids)}, ids)) == build.RELATED_COUNT
+
+
+def _store(tmp, ids=("E2002AAA", "E2002AAB", "E2002ZZZ"), dim=384):
+    import numpy as np
+    root = tmp / "dataset" / "embeddings" / "arctic-embed-s"
+    (root / "parts").mkdir(parents=True, exist_ok=True)
+    keys = [f"k{n}" for n in range(len(ids))]
+    vectors = np.zeros((len(ids), dim), dtype=np.float16)
+    vectors[:, 0] = 1.0
+    np.save(root / "parts" / "part-00000.npy", vectors)
+    (root / "parts" / "part-00000.keys").write_text("\n".join(keys) + "\n", "utf-8")
+    (root / "manifest.json").write_text(json.dumps({"parts": [{"name": "part-00000", "count": len(ids)}]}), "utf-8")
+    (root / "documents.jsonl").write_text("".join(json.dumps({"id": i, "keys": [k]}) + "\n" for i, k in zip(ids, keys)), "utf-8")
+
+
+def _vector_meta(tmp):
+    return _data(tmp, "vectors/meta.json")
+
+
+def test_a_build_writes_a_vector_for_each_passage_of_its_documents(dataset):
+    _store(dataset)
+    _build(dataset)
+    assert _vector_meta(dataset)["count"] == 2
+
+
+def test_passage_vectors_are_stored_as_signed_bytes(dataset):
+    _store(dataset)
+    _build(dataset)
+    revision = json.loads((dataset / "site" / "data" / "current.json").read_text("utf-8"))["revision"]
+    assert (dataset / "site" / "data" / revision / "vectors" / "vectors.i8").read_bytes()[0] == 127
+
+
+def test_a_build_without_embeddings_has_no_search_by_meaning(dataset):
+    _build(dataset)
+    revision = json.loads((dataset / "site" / "data" / "current.json").read_text("utf-8"))["revision"]
+    assert not (dataset / "site" / "data" / revision / "vectors").exists()
+
+
+def test_vectors_of_the_wrong_width_are_refused(dataset):
+    _store(dataset, dim=12)
+    with pytest.raises(build.BuildError):
+        _build(dataset)
+
+
+def test_a_document_referencing_a_missing_vector_is_refused(dataset):
+    _store(dataset)
+    root = dataset / "dataset" / "embeddings" / "arctic-embed-s"
+    path = root / "documents.jsonl"
+    path.write_text(json.dumps({"id": "E2002AAA", "keys": ["missing"]}) + "\n", encoding="utf-8")
+    with pytest.raises(build.BuildError, match="missing semantic passage vector"):
+        _build(dataset)
+
+
+def test_the_browsers_query_model_is_the_hosts_document_model():
+    import embed
+    assert (build.SEARCH_MODEL["revision"], build.SEARCH_MODEL["query_prefix"]) == (
+        embed.MODELS["arctic-embed-s"]["onnx"]["revision"], embed.MODELS["arctic-embed-s"]["query_prefix"])

@@ -89,6 +89,7 @@ RELATED_COUNT = 6
 
 def load_related(dataset: Path) -> dict[str, list[str]]:
     """Each document's nearest documents by meaning as `embed.py related` wrote them, or nothing before the first embedding run."""
+    related = {}
     for model in RELATED_MODELS:
         path = dataset / "embeddings" / model / "related.json"
         if not path.exists():
@@ -96,9 +97,12 @@ def load_related(dataset: Path) -> dict[str, list[str]]:
         raw = read_json(path)
         if not isinstance(raw, dict):
             raise BuildError(f"{path} is not a map of documents to related documents")
-        return {doc: [pair[0] for pair in near if isinstance(pair, list) and pair and isinstance(pair[0], str)]
-                for doc, near in raw.items() if isinstance(near, list)}
-    return {}
+        for doc, near in raw.items():
+            if isinstance(near, list):
+                candidates = [pair[0] for pair in near if isinstance(pair, list) and pair and isinstance(pair[0], str)]
+                if candidates:
+                    related.setdefault(doc, candidates)
+    return related
 
 
 def related_ordinals(document_id: str, related: dict[str, list[str]], ordinal_of_id: dict[str, int]) -> list[int]:
@@ -111,6 +115,61 @@ def related_ordinals(document_id: str, related: dict[str, list[str]], ordinal_of
         if len(out) == RELATED_COUNT:
             break
     return out
+
+
+# The model visitors' browsers run for search by meaning; its revision must match the host's encoder (checked by a test).
+SEARCH_MODEL = {"name": "arctic-embed-s", "hf": "Snowflake/snowflake-arctic-embed-s", "revision": "e596f507467533e48a2e17c007f0e1dacc837b33",
+                "dtype": "q8", "dim": 384, "query_prefix": "Represent this sentence for searching relevant passages: "}
+_PART_NAME = re.compile(r"^part-\d{5}$")
+
+
+def write_vectors(dataset: Path, target: Path, ordinal_of_id: dict[str, int]) -> int:
+    """Writes every passage vector of the documents in this build as signed bytes, with each passage's document ordinal; returns the count."""
+    import numpy as np
+
+    root = dataset / "embeddings" / SEARCH_MODEL["name"]
+    if not (root / "manifest.json").exists() or not (root / "documents.jsonl").exists():
+        return 0
+    keys, blocks = [], []
+    for part in read_json(root / "manifest.json").get("parts", []):
+        name = str(part.get("name", ""))
+        if not _PART_NAME.match(name):
+            raise BuildError(f"unexpected embedding part name {name!r}")
+        part_keys = (root / "parts" / f"{name}.keys").read_text(encoding="utf-8").split()
+        vectors = np.load(root / "parts" / f"{name}.npy", allow_pickle=False)
+        if (not isinstance(vectors, np.ndarray) or vectors.ndim != 2 or len(part_keys) != len(vectors)
+                or vectors.shape[1] != SEARCH_MODEL["dim"] or not np.isfinite(vectors).all()):
+            raise BuildError(f"embedding part {name} has {vectors.shape} vectors for {len(part_keys)} keys")
+        keys += part_keys
+        blocks.append(vectors)
+    row_of = {key: n for n, key in enumerate(keys)}
+    if len(row_of) != len(keys):
+        raise BuildError("the semantic index contains duplicate passage vectors")
+    rows, owners = [], []
+    with (root / "documents.jsonl").open(encoding="utf-8") as lines:
+        for line in lines:
+            if not line.strip():
+                continue
+            document = json.loads(line)
+            ordinal = ordinal_of_id.get(document.get("id"))
+            if ordinal is None:
+                continue
+            for key in document.get("keys", []):
+                if key not in row_of:
+                    raise BuildError(f"{document['id']} refers to a missing semantic passage vector")
+                rows.append(row_of[key])
+                owners.append(ordinal)
+    if not rows:
+        return 0
+    matrix = np.concatenate(blocks).astype(np.float32)
+    target.mkdir(parents=True, exist_ok=True)
+    # Unit vectors fit in a signed byte at a scale of 127, a quarter the size of 32-bit floats with no change to the ranking that matters.
+    (target / "vectors.i8").write_bytes(np.clip(np.rint(matrix[rows] * 127), -127, 127).astype(np.int8).tobytes())
+    (target / "ordinals.u32").write_bytes(np.asarray(owners, dtype="<u4").tobytes())
+    write_json(target / "meta.json", {**{k: SEARCH_MODEL[k] for k in ("hf", "revision", "dtype", "dim", "query_prefix")},
+                                      "model": SEARCH_MODEL["name"], "count": len(rows), "scale": 127, "layout": "flat",
+                                      "files": {"vectors": "vectors.i8", "ordinals": "ordinals.u32"}})
+    return len(rows)
 
 
 def load_edisondigital(dataset: Path) -> dict:
@@ -226,7 +285,7 @@ def topic_matches(topic: dict, terms: dict[str, int]) -> bool:
     return False
 
 
-ASSET_DIRS = ("css", "js", "fonts", "img")
+ASSET_DIRS = ("css", "js", "fonts", "img", "vendor")
 ASSET_REVISION = re.compile(r"[0-9a-f]{12}")
 
 
@@ -455,6 +514,9 @@ def build(dataset: Path, web: Path, out: Path, *, allow_shrink: bool = False, da
                "recent": [ordinal_of[r["id"]] for r in recent[:12]], "hero": hero,
                "sources": {"local": len(local), "edisondigital": len(remote)},
                "local_published_at": manifest.get("generated_at", "")}
+    passages = write_vectors(dataset, site_data / "vectors", ordinal_of_id)
+    if passages:
+        logger.info("wrote %d passage vectors for search by meaning", passages)
     write_json(site_data / "catalog.json", catalog)
     revision = hashlib.sha256(json.dumps([catalog, sorted(shards)], sort_keys=True).encode()).hexdigest()[:16]
     final = data_root / revision
@@ -477,7 +539,8 @@ def build(dataset: Path, web: Path, out: Path, *, allow_shrink: bool = False, da
 
 # What the build reads; scans, viewer images and PDFs stay on Hugging Face and are checked against the file listing instead.
 RECORD_PATTERNS = ["local/manifest.json", "local/*/record.json", "edisondigital/current.json", "edisondigital/*/records.jsonl",
-                   "embeddings/*/related.json"]
+                   "embeddings/*/related.json", "embeddings/arctic-embed-s/manifest.json", "embeddings/arctic-embed-s/documents.jsonl",
+                   "embeddings/arctic-embed-s/parts/*"]
 
 
 def first_thumbnails(dataset: Path, listing: set[str]) -> list[str]:

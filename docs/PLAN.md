@@ -575,3 +575,25 @@ What changes:
   For 248 of 294 documents, the nearest neighbour is in the same collection.
 - **At 100,000 documents,** expect about 350,000 passages: 270 MB of vectors with arctic-embed-s, 720 MB with Qwen3 at full
   width. That is minutes on one L40S, and an hour or two as a CPU job array.
+
+## Search by meaning in the site (21 November)
+
+- **Builder:** writes `data/{revision}/vectors/`:
+  - `vectors.i8`: each arctic-embed-s passage vector as signed bytes (scale 127);
+  - `ordinals.u32`: each passage's document;
+  - `meta.json`: the model, its pinned revision and the query prefix, with `layout: "flat"`.
+  Only documents in the build are included. At about 5,300 passages this is 2 MB.
+- **Browser:**
+  - `js/semantic-worker.js` runs Snowflake's 8-bit ONNX query model (32 MB, downloaded once and cached) with vendored
+    Transformers.js 4.3.2 and the WebAssembly-only ONNX Runtime (14 MB), served with the worker in the same versioned asset bundle. The page's
+    security policy is unchanged, because a same-origin worker gets its own policy.
+  - `js/semantic.js` scores every passage and keeps documents within 0.12 of the best match and above 0.5 (at most
+    40). It merges them with keyword results by Reciprocal Rank Fusion (k = 60). Documents found only by meaning are
+    tagged "Matched by meaning".
+- **When it runs:** for plain multi-word queries only. Quotes, field searches, exclusions and Exact phrase stay
+  keyword-only. Keyword results always show first. A "Search by meaning" switch is on by default (off when the browser
+  asks to save data), and its setting is remembered.
+- **Measured with the model warm:** a search, including the meaning pass, takes about 0.12 s. For example, "houses built
+  from poured concrete" adds 6 Cement House letters to the 1 keyword hit.
+- **At scale:** above roughly 20,000 passages, `layout` becomes a clustered index on Hugging Face, and only the clusters
+  nearest each query are downloaded. See "Scale" above.

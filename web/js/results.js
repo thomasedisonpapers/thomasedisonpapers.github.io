@@ -1,6 +1,7 @@
 // The search experience shared by the search page and topic pages: query, refine sidebar, results, views and paging.
 import { catalog, dataUrl, esc, fetchJSON, icon, indexMeta, plural, sources, statusHelp, summaries, wireHelp, STATUS } from "./core.js";
 import { documentEntry } from "./cards.js";
+import { createSemantic, eligible, fuse, meaningText, topMatches } from "./semantic.js";
 import { enhanceSelect, rangeSlider } from "./controls.js";
 import { Index, applyFilters, describeQuery, highlight, maskFields, parseQuery, runQuery, setStopwords, setVariants, sortResults, suggest } from "./search.js";
 
@@ -61,6 +62,8 @@ export async function mountResults(root, { base = "", placeholder = "Search the 
         <div class="segmented" role="radiogroup" aria-label="Match">
           ${[["all", "All words"], ["any", "Any word"], ["exact", "Exact phrase"]].map(([v, l]) =>
             `<label><input type="radio" name="mode" value="${v}"><span>${l}</span></label>`).join("")}</div>
+        <label class="switch" id="meaning-switch" hidden title="Also finds documents that say the same thing in other words. The first search downloads a 32 MB model once.">
+          <input type="checkbox" id="meaning" role="switch"><span class="track" aria-hidden="true"></span><span>Search by meaning</span></label>
         <button type="button" class="btn link" id="adv-toggle" aria-expanded="false">${icon("sliders-horizontal")}Advanced search</button>
         <a class="btn link" href="about.html#search">${icon("info")}Search tips</a>
       </div>
@@ -84,6 +87,7 @@ export async function mountResults(root, { base = "", placeholder = "Search the 
         </div>
         <div class="active-filters" id="active-filters" hidden></div>
         <p class="details-line" id="details" hidden></p>
+        <p class="details-line meaning-status" id="meaning-status" aria-live="polite" hidden></p>
         <div id="results-wrap"><div class="results" id="rows"></div></div>
         <nav class="pager" id="pager" aria-label="Pages"></nav>
       </section>
@@ -93,6 +97,12 @@ export async function mountResults(root, { base = "", placeholder = "Search the 
   const years = facets.year.filter((y) => y > 0);
   const firstYear = years.length ? Math.min(...years) : 1850;
   const lastYear = years.length ? Math.max(...years) : 1950;
+  // Search by meaning loads only when used, and is off by default for visitors whose browser asks to save data.
+  const semantic = createSemantic({ dataUrl, vendor: new URL("../vendor/", import.meta.url).href });
+  const meaningBox = root.querySelector("#meaning");
+  const remembered = (() => { try { return localStorage.getItem("edison.meaning"); } catch { return null; } })();
+  meaningBox.checked = remembered ? remembered === "1" : !(navigator.connection && navigator.connection.saveData);
+  semantic.available().then((ok) => { root.querySelector("#meaning-switch").hidden = !ok; });
   const form = root.querySelector("form");
   const input = root.querySelector("#q");
   const refine = root.querySelector(".refine");
@@ -161,12 +171,18 @@ export async function mountResults(root, { base = "", placeholder = "Search the 
   });
   root.querySelectorAll("input[name=mode]").forEach((r) => r.addEventListener("change", () => { if (input.value.trim()) form.requestSubmit(); }));
   root.querySelectorAll("input[name=view]").forEach((r) => r.addEventListener("change", () => update({ view: r.value })));
+  meaningBox.addEventListener("change", () => {
+    try { localStorage.setItem("edison.meaning", meaningBox.checked ? "1" : "0"); } catch { /* A private window keeps the choice for this page only. */ }
+    run();
+  });
   root.querySelector("#sort").addEventListener("change", (e) => update({ sort: e.target.value, page: 1 }));
   root.querySelector("#per").addEventListener("change", (e) => update({ per: Number(e.target.value), page: 1 }));
   window.addEventListener("popstate", () => { state = readState(); sync(); run(); });
 
   async function run(focus = false, reveal = false) {
     const mine = ++request;
+    const requestedPage = state.page;
+    const perPage = state.per;
     const countEl = root.querySelector("#results-count");
     const rowsEl = root.querySelector("#rows");
     const slow = setTimeout(() => { if (mine === request) countEl.textContent = "Searching…"; }, 300);
@@ -198,28 +214,72 @@ export async function mountResults(root, { base = "", placeholder = "Search the 
           broadened = true;
         }
       }
-      const hints = kept.length ? [] : await suggest(own, index);
-      const ordered = sortResults(kept, state.sort || (query.clauses.length ? "" : "oldest"), result.scores, facets);
-      const pages = Math.max(1, Math.ceil(ordered.length / state.per));
-      state.page = Math.min(state.page, pages);
-      const slice = ordered.slice((state.page - 1) * state.per, state.page * state.per);
-      const items = slice.length ? await summaries(slice) : [];
+      // Draws one set of results; the meaning pass calls it again with the merged list, so both look and behave the same.
+      const present = async (shown, shownCounts, ordered, { meaning = new Set(), extra = "" } = {}) => {
+        const hints = shown.length ? [] : await suggest(own, index);
+        const pages = Math.max(1, Math.ceil(ordered.length / perPage));
+        const page = Math.min(requestedPage, pages);
+        const slice = ordered.slice((page - 1) * perPage, page * perPage);
+        const items = slice.length ? await summaries(slice) : [];
+        if (mine !== request) return null;
+        clearTimeout(slow);
+        countEl.textContent = ordered.length ? `${plural(ordered.length, "result")}${pages > 1 ? ` · page ${page} of ${pages}` : ""}` : "No results";
+        const details = root.querySelector("#details");
+        const notes = own.notes || [];
+        details.hidden = !(own.clauses.length || own.yearFrom || notes.length);
+        details.innerHTML = `${icon("info")} ${broadened ? "No document has all of your words, so these have most of them, best matches first. "
+          : ""}${esc(describeQuery(own))}${notes.length ? ` ${notes.map(esc).join(" ")}` : ""}${extra ? ` ${esc(extra)}` : ""}`;
+        rowsEl.innerHTML = items.length ? items.map((s) => documentEntry(s, dataset[0], {
+          title: highlight(s.title, query, esc), description: s.description ? highlight(s.description, query, esc) : null,
+          matched: query.clauses.length && !meaning.has(s.ordinal) ? maskFields(result.where.get(s.ordinal) || 0).join(", ") : "",
+          byMeaning: meaning.has(s.ordinal),
+        })).join("") : emptyState(hints);
+        renderPager(pages, page);
+        renderRefine(shownCounts, filters);
+        return page;
+      };
+      const sort = state.sort || (query.clauses.length ? "" : "oldest");
+      let page = await present(kept, counts, sortResults(kept, sort, result.scores, facets));
       if (mine !== request) return;
-      clearTimeout(slow);
-      countEl.textContent = ordered.length ? `${plural(ordered.length, "result")}${pages > 1 ? ` · page ${state.page} of ${pages}` : ""}` : "No results";
-      const details = root.querySelector("#details");
-      const notes = own.notes || [];
-      details.hidden = !(own.clauses.length || own.yearFrom || notes.length);
-      details.innerHTML = `${icon("info")} ${broadened ? "No document has all of your words, so these have most of them, best matches first. "
-        : ""}${esc(describeQuery(own))}${notes.length ? ` ${notes.map(esc).join(" ")}` : ""}`;
-      rowsEl.innerHTML = items.length ? items.map((s) => documentEntry(s, dataset[0], {
-        title: highlight(s.title, query, esc), description: s.description ? highlight(s.description, query, esc) : null,
-        matched: query.clauses.length ? maskFields(result.where.get(s.ordinal) || 0).join(", ") : "",
-      })).join("") : emptyState(hints);
-      renderPager(pages);
-      renderRefine(counts, filters);
       if (focus) countEl.focus();
       if (reveal) revealResults();
+      const status = root.querySelector("#meaning-status");
+      status.hidden = true;
+      if (!meaningBox.checked || base || !eligible(own, state.q)) {
+        state.page = page;
+        return;
+      }
+      // Keyword results are already showing; documents that match by meaning are merged in when the model has answered.
+      const waiting = setTimeout(() => {
+        if (mine !== request) return;
+        status.textContent = "Also looking for documents that match by meaning…";
+        status.hidden = false;
+      }, 400);
+      try {
+        const best = await semantic.search(meaningText(state.q));
+        if (mine !== request) return;
+        const allowed = new Set(applyFilters([...best.keys()], facets, filters).kept);
+        const byMeaning = topMatches(best, { allowed });
+        const found = new Set(kept);
+        const fresh = byMeaning.filter((ordinal) => !found.has(ordinal));
+        if (byMeaning.length) {
+          const union = [...kept, ...fresh];
+          const fused = fuse([sortResults(kept, "", result.scores, facets), byMeaning]);
+          const order = sort ? sortResults(union, sort, result.scores, facets)
+            : union.slice().sort((a, b) => (fused.get(b) || 0) - (fused.get(a) || 0) || a - b);
+          const candidates = [...new Set([...result.ordinals, ...topMatches(best), ...byMeaning])];
+          page = await present(union, applyFilters(candidates, facets, filters).counts, order, {
+            meaning: new Set(fresh), extra: fresh.length ? `Also showing ${plural(fresh.length, "document")} that match by meaning.` : "" });
+        }
+      } catch {
+        // Search by meaning is an extra; when the model or vectors cannot load, the keyword results simply stand.
+      } finally {
+        clearTimeout(waiting);
+        if (mine === request) {
+          state.page = page;
+          status.hidden = true;
+        }
+      }
     } catch (error) {
       clearTimeout(slow);
       if (mine !== request) return;
@@ -239,16 +299,16 @@ export async function mountResults(root, { base = "", placeholder = "Search the 
       ${state.mode !== "any" && state.q ? `<p><a href="?${esc(broader.toString())}">Search “${esc(state.q)}” more broadly</a></p>` : ""}</div>`;
   }
 
-  function renderPager(pages) {
+  function renderPager(pages, page) {
     const pager = root.querySelector("#pager");
     if (pages < 2) { pager.innerHTML = ""; return; }
-    const list = [...new Set([1, pages, state.page - 1, state.page, state.page + 1].filter((n) => n >= 1 && n <= pages))].sort((a, b) => a - b);
-    let html = `<button class="btn" data-page="${state.page - 1}" ${state.page === 1 ? "disabled" : ""}>${icon("chevron-left")}Previous</button>`;
+    const list = [...new Set([1, pages, page - 1, page, page + 1].filter((n) => n >= 1 && n <= pages))].sort((a, b) => a - b);
+    let html = `<button class="btn" data-page="${page - 1}" ${page === 1 ? "disabled" : ""}>${icon("chevron-left")}Previous</button>`;
     list.forEach((n, i) => {
       if (i && n - list[i - 1] > 1) html += `<span class="muted" aria-hidden="true">…</span>`;
-      html += `<button class="btn" data-page="${n}" ${n === state.page ? 'aria-current="page"' : ""}>${n}</button>`;
+      html += `<button class="btn" data-page="${n}" ${n === page ? 'aria-current="page"' : ""}>${n}</button>`;
     });
-    html += `<button class="btn" data-page="${state.page + 1}" ${state.page === pages ? "disabled" : ""}>Next${icon("chevron-right")}</button>`;
+    html += `<button class="btn" data-page="${page + 1}" ${page === pages ? "disabled" : ""}>Next${icon("chevron-right")}</button>`;
     pager.innerHTML = html;
     pager.querySelectorAll("button[data-page]").forEach((b) => b.addEventListener("click", () => {
       update({ page: Number(b.dataset.page) }, true);
