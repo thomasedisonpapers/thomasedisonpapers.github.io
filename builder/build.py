@@ -286,9 +286,13 @@ def shared_scans(records: dict) -> list[dict]:
     groups: dict[str, list[str]] = defaultdict(list)
     for document_id in parent:
         groups[root(document_id)].append(document_id)
-    return [{"documents": sorted(members),
-             "identical": len({tuple(p.get("sha256") for p in records[m].get("pages") or []) for m in members}) == 1}
-            for members in sorted(groups.values(), key=min) if len(members) > 1]
+    out = []
+    for members in sorted(groups.values(), key=min):
+        if len(members) < 2:
+            continue
+        signatures = {tuple(p.get("sha256") for p in records[m].get("pages") or []) for m in members}
+        out.append({"documents": sorted(members), "identical": len(signatures) == 1 and all(next(iter(signatures)))})
+    return out
 
 
 def report_shared_scans(groups: list[dict]) -> None:
@@ -304,9 +308,12 @@ def report_shared_scans(groups: list[dict]) -> None:
     summary_file = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary_file:
         # The run's summary page is where an editor will see this, not the log.
-        with open(summary_file, "a", encoding="utf-8") as handle:
-            handle.write(f"### {count} documents share a page scan\n\nCheck these page ranges in the review platform.\n\n"
-                         + "".join(f"- {line}\n" for line in lines) + "\n")
+        try:
+            with open(summary_file, "a", encoding="utf-8") as handle:
+                handle.write(f"### {count} documents share a page scan\n\nCheck these page ranges in the review platform.\n\n"
+                             + "".join(f"- {line}\n" for line in lines) + "\n")
+        except OSError as exc:
+            logger.warning("could not write the shared scan job summary: %s", exc)
 
 
 def folder_description(records: list[dict]) -> str:
@@ -449,7 +456,9 @@ def build(dataset: Path, web: Path, out: Path, *, allow_shrink: bool = False, da
                     raise BuildError(f"{record['id']} page {page.get('n')} has no {size} file at {path}")
         if record.get("pdf") and not has_file(record["pdf"]):
             raise BuildError(f"{record['id']} has no PDF file at {record['pdf']}")
-        record["description"] = describe.describe(record)
+        harvested = remote.get(record["id"], {})
+        if not harvested.get("description") or record.get("description") != harvested["description"]:
+            record["description"] = describe.describe(record)
     report_shared_scans(shared_scans(records))
 
     previous_pointer = out / "data" / "current.json"

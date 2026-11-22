@@ -117,6 +117,17 @@ def test_pages_without_a_hash_are_never_reported_as_shared():
     assert build.shared_scans(records) == []
 
 
+def test_shared_scans_with_unknown_pages_are_not_reported_as_identical():
+    records = {r["id"]: r for r in [scanned("A1", "a", None), scanned("A2", "a", None)]}
+    assert build.shared_scans(records) == [{"documents": ["A1", "A2"], "identical": False}]
+
+
+def test_an_unwritable_scan_summary_does_not_stop_the_build(tmp_path, monkeypatch, caplog):
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(tmp_path))
+    build.report_shared_scans([{"documents": ["A1", "A2"], "identical": True}])
+    assert "could not write the shared scan job summary" in caplog.text
+
+
 @pytest.fixture
 def dataset(tmp_path):
     root = tmp_path / "dataset" / "local"
