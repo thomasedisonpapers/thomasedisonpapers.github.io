@@ -442,18 +442,25 @@ def main(argv=None) -> int:
     parser.add_argument("--queries", type=Path, help="a text file of evaluation queries, one per line")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
+    encoder = None
+
+    def encode(texts):
+        nonlocal encoder
+        if encoder is None:
+            load = load_onnx_encoder if args.backend == "onnx" else load_encoder
+            encoder = load(args.model, batch=args.batch)
+        return encoder(texts)
+
     try:
         if args.step == "plan":
             print(json.dumps(plan(args.dataset, args.store, args.model, scope=args.scope)))
         elif args.step == "encode":
-            encoder = (load_onnx_encoder(args.model, batch=args.batch) if args.backend == "onnx"
-                       else load_encoder(args.model, batch=args.batch))
-            print(encode_chunks(args.store, args.model, encoder, only=args.chunk))
+            print(encode_chunks(args.store, args.model, encode, only=args.chunk))
         elif args.step == "collect":
             print(json.dumps(collect(args.store, args.model)))
         elif args.step == "queries":
             lines = [q.strip() for q in args.queries.read_text(encoding="utf-8").splitlines() if q.strip() and not q.startswith("#")]
-            encode_queries(args.store, args.model, load_encoder(args.model, batch=args.batch), lines)
+            encode_queries(args.store, args.model, encode, lines)
         elif args.step == "search":
             root = args.store / args.model
             queries = json.loads((root / "queries.json").read_text(encoding="utf-8"))

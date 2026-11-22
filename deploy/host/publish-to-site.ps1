@@ -46,7 +46,8 @@ try {
     $archivePython = Join-Path $Archive ".venv\Scripts\python.exe"
     $embed = Join-Path $Archive "builder\embed.py"
     $store = Join-Path $Dataset "embeddings"
-    # Embedding is best effort: if it fails, the records still upload alongside the last complete vectors.
+    # Publish records independently if embedding fails so withdrawals never wait for the model.
+    $uploadModel = "arctic-embed-s"
     try {
         Invoke-Step "planning embeddings" $archivePython @($embed, "plan", "--dataset", $Dataset, "--store", $store,
             "--model", "arctic-embed-s", "--scope", "transcribed")
@@ -56,8 +57,10 @@ try {
         Invoke-Step "finding related documents" $archivePython @($embed, "related", "--store", $store, "--model", "arctic-embed-s")
     } catch {
         Write-Log "embedding skipped this run: $_"
+        $uploadModel = "none"
     }
-    Invoke-Step "uploading" $archivePython @((Join-Path $Archive "builder\upload.py"), "--dataset", $Dataset)
+    Invoke-Step "uploading" $archivePython @((Join-Path $Archive "builder\upload.py"), "--dataset", $Dataset,
+        "--embedding-model", $uploadModel)
     Write-Log "done"
 } catch {
     Write-Log "FAILED: $_"

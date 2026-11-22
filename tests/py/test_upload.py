@@ -37,8 +37,8 @@ def _dataset(tmp_path, documents=("E2002AAA",), folder="new/E2002", withdrawn=()
     return tmp_path
 
 
-def _embeddings(dataset, ids=("E2002AAA",)):
-    model = dataset / "embeddings" / "arctic-embed-s"
+def _embeddings(dataset, ids=("E2002AAA",), model_name="arctic-embed-s"):
+    model = dataset / "embeddings" / model_name
     (model / "parts").mkdir(parents=True)
     np.save(model / "parts" / "part-00000.npy", np.ones((1, 3), dtype=np.float16))
     (model / "parts" / "part-00000.keys").write_text(f"{KEY}\n", "utf-8")
@@ -52,10 +52,11 @@ def _embeddings(dataset, ids=("E2002AAA",)):
 class FakeHub:
     """A stand-in Hugging Face repository that stores files in memory and records each commit's message and paths."""
 
-    def __init__(self, private=True, files=None, drop=None):
+    def __init__(self, private=True, files=None, drop=None, cache=None):
         self.private, self.files, self.commits, self.drop = private, dict(files or {}), [], drop
         self.preuploads = []
         self.oid = "0" * 40
+        self.cache = cache
 
     def repo_info(self, repo, repo_type, revision):
         assert revision == "main"
@@ -67,6 +68,13 @@ class FakeHub:
             text = path.endswith((".json", ".jsonl", ".keys"))
             yield SimpleNamespace(path=path, blob_id=hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest(),
                                   lfs=None if text else SimpleNamespace(sha256=hashlib.sha256(data).hexdigest()))
+
+    def hf_hub_download(self, repo, filename, repo_type, revision):
+        assert revision == self.oid
+        path = self.cache / revision / filename
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(self.files[filename])
+        return str(path)
 
     def preupload_lfs_files(self, repo, additions, repo_type, revision):
         assert revision == "main"
@@ -292,7 +300,7 @@ def test_a_concurrent_commit_prevents_replacing_the_revision_that_was_checked(tm
 
 
 def test_an_upload_without_embeddings_leaves_the_published_embeddings_in_place(tmp_path):
-    hub = FakeHub(files={"embeddings/arctic-embed-s/related.json": b"{}"})
+    hub = FakeHub(files={"embeddings/arctic-embed-s/related.json": b"{}"}, cache=tmp_path / "hf-cache")
     upload.upload(_dataset(tmp_path), "org/repo", hub)
     assert "embeddings/arctic-embed-s/related.json" in hub.files
 
@@ -300,9 +308,47 @@ def test_an_upload_without_embeddings_leaves_the_published_embeddings_in_place(t
 def test_an_upload_with_one_models_embeddings_leaves_another_models_in_place(tmp_path):
     dataset = _dataset(tmp_path)
     _embeddings(dataset)
-    hub = FakeHub(files={"embeddings/qwen3-embedding-0.6b/manifest.json": b"{}"})
+    stored = _embeddings(tmp_path / "remote", model_name="qwen3-embedding-0.6b")
+    files = {p.relative_to(tmp_path / "remote").as_posix(): p.read_bytes() for p in stored.rglob("*")
+             if p.is_file() and upload.EMBEDDING_FILE.fullmatch(p.relative_to(tmp_path / "remote").as_posix())}
+    hub = FakeHub(files=files, cache=tmp_path / "hf-cache")
     upload.upload(dataset, "org/repo", hub)
     assert "embeddings/qwen3-embedding-0.6b/manifest.json" in hub.files
+
+
+@pytest.mark.parametrize("model_on_host", [True, False])
+def test_a_records_only_withdrawal_removes_stale_remote_vectors_in_the_same_commit(tmp_path, model_on_host):
+    old_id = "E2002OLD"
+    dataset = _dataset(tmp_path, withdrawn=(old_id,))
+    prefix = "embeddings/arctic-embed-s/"
+    if model_on_host:
+        _embeddings(dataset, ids=(old_id,))
+    hub = FakeHub(files={
+        prefix + "documents.jsonl": (json.dumps({"id": old_id, "keys": [KEY]}) + "\n").encode(),
+        prefix + "manifest.json": b"{}",
+        prefix + "parts/part-00000.npy": b"old",
+        prefix + "parts/part-00000.keys": KEY.encode(),
+        "local/E2002OLD/record.json": b"{}",
+    }, cache=tmp_path / "hf-cache")
+
+    upload.upload(dataset, "org/repo", hub, embedding_model="none")
+
+    assert len(hub.commits) == 1 and not any(path.startswith(prefix) or old_id in path for path in hub.files)
+
+
+def test_an_upload_removes_a_retained_model_with_a_dead_passage_row(tmp_path):
+    dataset = _dataset(tmp_path)
+    prefix = "embeddings/arctic-embed-s/"
+    hub = FakeHub(files={
+        prefix + "documents.jsonl": (json.dumps({"id": "E2002AAA", "keys": [KEY]}) + "\n").encode(),
+        prefix + "manifest.json": b'{"parts":[{"name":"part-00000","count":2}]}',
+        prefix + "parts/part-00000.npy": b"old",
+        prefix + "parts/part-00000.keys": f"{KEY}\n{'b' * 20}\n".encode(),
+    }, cache=tmp_path / "hf-cache")
+
+    upload.upload(dataset, "org/repo", hub, embedding_model="none")
+
+    assert not any(path.startswith(prefix) for path in hub.files)
 
 
 def test_an_upload_with_a_models_embeddings_removes_that_models_stale_parts(tmp_path):

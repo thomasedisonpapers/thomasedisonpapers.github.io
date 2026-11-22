@@ -100,9 +100,9 @@ The host keeps the site in step with the review platform, with no change to the 
         no PyTorch, and its vectors match Amarel's PyTorch ones to a cosine of 0.9999;
       - `collect` folds them into the store, and `related` recomputes each document's related documents.
 
-      Embedding is best effort: if it fails, the records still upload alongside the last complete vectors.
-   4. `upload.py` sends whatever changed. It manages `local/` and each embedding model it has, so other models' vectors
-      (for example Qwen3, made on Amarel) are left alone.
+   4. `upload.py` sends whatever changed. The host uploads Arctic and falls back to records alone if embedding fails.
+      Other models, such as Qwen3 from Amarel, stay on `main` when their document and passage references still match the
+      catalogue. Incompatible model files are removed in the same commit as the catalogue update.
 
    A run with nothing new uploads nothing. Logs are in `%USERPROFILE%\edison-site\logs`.
 2. **The deploy workflow** checks every 15 minutes whether the dataset's revision differs from the one the site serves,

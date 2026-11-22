@@ -9,7 +9,6 @@ import argparse
 import hashlib
 import json
 import logging
-import math
 import os
 import re
 import shutil
@@ -55,10 +54,13 @@ class UploadError(Exception):
     """A release that failed validation or could not be verified."""
 
 
-def local_files(dataset: Path) -> dict[str, Path]:
+def local_files(dataset: Path, *, embedding_model: str | None = None) -> dict[str, Path]:
     """Every file that belongs in the repository, by its path there; hidden bookkeeping such as `.publish-state` is never included."""
     files = {}
-    for top in ("local", "embeddings"):
+    roots = ["local"]
+    if embedding_model != "none":
+        roots.append(f"embeddings/{embedding_model}" if embedding_model else "embeddings")
+    for top in roots:
         root = dataset / top
         if not root.is_dir():
             continue
@@ -66,18 +68,18 @@ def local_files(dataset: Path) -> dict[str, Path]:
             rel = path.relative_to(dataset).as_posix()
             if not path.is_file() or any(part.startswith(".") for part in rel.split("/")):
                 continue
-            if top == "embeddings" and not EMBEDDING_FILE.match(rel):
+            if top != "local" and not EMBEDDING_FILE.fullmatch(rel):
                 continue
             files[rel] = path
     return files
 
 
-def _snapshot(dataset: Path, destination: Path) -> None:
+def _snapshot(dataset: Path, destination: Path, embedding_model: str | None) -> None:
     """Copies the release inputs and detects changes while the copy is being made."""
     root = dataset.resolve()
 
     def inventory():
-        paths = local_files(dataset)
+        paths = local_files(dataset, embedding_model=embedding_model)
         signatures = {}
         for name, path in paths.items():
             if path.is_symlink() or not path.resolve().is_relative_to(root):
@@ -140,15 +142,15 @@ def read_json(path: Path):
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def check(dataset: Path) -> list[str]:
+def check(dataset: Path, *, embedding_model: str | None = None) -> list[str]:
     """Everything that stops an upload: fields outside the allowlist, test folders, withdrawn or stray files, image metadata, unpublished embeddings."""
     try:
-        return _check(dataset)
+        return _check(dataset, embedding_model)
     except (OSError, ValueError, EOFError, OverflowError) as exc:
         return [f"could not validate the dataset: {exc}"]
 
 
-def _check(dataset: Path) -> list[str]:
+def _check(dataset: Path, embedding_model: str | None) -> list[str]:
     problems: list[str] = []
     manifest_path = dataset / "local" / "manifest.json"
     if not manifest_path.exists():
@@ -217,7 +219,7 @@ def _check(dataset: Path) -> list[str]:
                 problems.append(f"{document_id} points outside its folder: {name!r}")
             else:
                 allowed.add(f"local/{document_id}/{Path(name).as_posix()}")
-    files = local_files(dataset)
+    files = local_files(dataset, embedding_model=embedding_model)
     root = dataset.resolve()
     for rel, path in files.items():
         if path.is_symlink() or not path.resolve().is_relative_to(root):
@@ -320,15 +322,19 @@ def check_embeddings(model: Path, files: set[Path], published: set[str], problem
     if related_path in files:
         expected.add(related_path)
         related = read_json(related_path)
-        if not isinstance(related, dict) or any(
-                document not in document_ids or not isinstance(pairs, list) or any(
-                    not isinstance(pair, list) or len(pair) != 2 or not isinstance(pair[0], str)
-                    or pair[0] not in document_ids or type(pair[1]) not in (int, float) or not math.isfinite(pair[1])
-                    for pair in pairs)
-                for document, pairs in related.items()):
+        if not _valid_related(related, document_ids):
             problems.append(f"{label}/related.json contains invalid or unpublished references")
     for extra in sorted(files - expected):
         problems.append(f"{label}/{extra.relative_to(model).as_posix()} is not part of the published embedding store")
+
+
+def _valid_related(related, allowed: set[str]) -> bool:
+    return isinstance(related, dict) and all(
+        document in allowed and isinstance(pairs, list) and all(
+            isinstance(pair, list) and len(pair) == 2 and isinstance(pair[0], str)
+            and pair[0] in allowed and type(pair[1]) in (int, float) and -1.001 <= pair[1] <= 1.001
+            for pair in pairs)
+        for document, pairs in related.items())
 
 
 def _digests(path: Path) -> tuple[str, str]:
@@ -369,21 +375,90 @@ def _same_public_manifest(path: Path, api, repo: str, revision: str) -> bool:
     return local == published
 
 
-def upload(dataset: Path, repo: str, api, *, dry_run: bool = False) -> dict:
+def _affected_remote_models(dataset: Path, api, repo: str, revision: str, remote: dict, managed: set[str]) -> set[str]:
+    """Finds retained model outputs that can no longer safely accompany the published catalogue."""
+    manifest = read_json(dataset / "local" / "manifest.json")
+    published = {doc for folder in manifest["folders"].values() for doc in folder.get("documents", {})}
+    published.difference_update(manifest.get("withdrawn", []))
+    models: dict[str, set[str]] = {}
+    for path in remote:
+        if path.startswith("embeddings/") and path.count("/") >= 2:
+            prefix = "/".join(path.split("/")[:2]) + "/"
+            if prefix not in managed:
+                models.setdefault(prefix, set()).add(path[len(prefix):])
+    affected = set()
+    for prefix, names in models.items():
+        try:
+            if _remote_model_is_current(api, repo, revision, prefix, names, published):
+                continue
+        except ValueError:
+            pass
+        logger.warning("removing retained embedding output for %s because it does not match the published catalogue", prefix)
+        affected.add(prefix)
+    return affected
+
+
+def _remote_model_is_current(api, repo: str, revision: str, prefix: str, names: set[str], published: set[str]) -> bool:
+    def fetch(name: str) -> Path:
+        return Path(api.hf_hub_download(repo, prefix + name, repo_type="dataset", revision=revision))
+
+    if names == {"related.json"}:
+        return _valid_related(read_json(fetch("related.json")), published)
+    if not {"manifest.json", "documents.jsonl"}.issubset(names):
+        return False
+    documents, referenced = set(), set()
+    for line in fetch("documents.jsonl").read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        entry = json.loads(line)
+        if not isinstance(entry, dict) or set(entry) != {"id", "keys"}:
+            return False
+        doc, keys = entry["id"], entry["keys"]
+        if (not safe_id(doc) or doc not in published or doc in documents or not isinstance(keys, list)
+                or not keys or any(not isinstance(key, str) or not PASSAGE_KEY.fullmatch(key) for key in keys)):
+            return False
+        documents.add(doc)
+        referenced.update(keys)
+
+    manifest = read_json(fetch("manifest.json"))
+    if not isinstance(manifest, dict) or not isinstance(manifest.get("parts"), list):
+        return False
+    expected = {"manifest.json", "documents.jsonl"}
+    remaining = referenced.copy()
+    for part in manifest["parts"]:
+        if not isinstance(part, dict) or not isinstance(part.get("name"), str) or not PART_NAME.fullmatch(part["name"]):
+            return False
+        key_path, vector_path = (f"parts/{part['name']}{suffix}" for suffix in (".keys", ".npy"))
+        if key_path in expected or not {key_path, vector_path}.issubset(names):
+            return False
+        keys = fetch(key_path).read_text(encoding="utf-8").split()
+        unique = set(keys)
+        if len(unique) != len(keys) or len(keys) != part.get("count") or not unique.issubset(remaining):
+            return False
+        remaining.difference_update(unique)
+        expected.update((key_path, vector_path))
+    if "related.json" in names:
+        if not _valid_related(read_json(fetch("related.json")), documents):
+            return False
+        expected.add("related.json")
+    return not remaining and names == expected
+
+
+def upload(dataset: Path, repo: str, api, *, dry_run: bool = False, embedding_model: str | None = None) -> dict:
     """Publishes from a private temporary copy so edits cannot bypass validation."""
     if dry_run:
-        return _upload(dataset, repo, api, dry_run=True)
+        return _upload(dataset, repo, api, dry_run=True, embedding_model=embedding_model)
     with TemporaryDirectory(prefix="edison-upload-") as directory:
         snapshot = Path(directory)
-        _snapshot(dataset, snapshot)
-        return _upload(snapshot, repo, api, dry_run=False)
+        _snapshot(dataset, snapshot, embedding_model)
+        return _upload(snapshot, repo, api, dry_run=False, embedding_model=embedding_model)
 
 
-def _upload(dataset: Path, repo: str, api, *, dry_run: bool) -> dict:
+def _upload(dataset: Path, repo: str, api, *, dry_run: bool, embedding_model: str | None) -> dict:
     """Pre-uploads large files, then commits the entire validated update to main and verifies that revision."""
     from huggingface_hub import CommitOperationAdd, CommitOperationDelete
 
-    problems = check(dataset)
+    problems = check(dataset, embedding_model=embedding_model)
     if problems:
         raise UploadError(f"{len(problems)} problem(s), the first: " + "; ".join(problems[:5]))
     info = api.repo_info(repo, repo_type="dataset", revision="main")
@@ -392,11 +467,12 @@ def _upload(dataset: Path, repo: str, api, *, dry_run: bool) -> dict:
     remote = remote_files(api, repo, info.sha)
     if "local/manifest.json" not in remote and not info.private:
         raise UploadError(f"{repo} is public and has never been uploaded to; the first upload must go to a private repository")
-    files = local_files(dataset)
+    files = local_files(dataset, embedding_model=embedding_model)
     changed = [p for p in files if not POINTER.match(p) and not (p in remote and _same(files[p], remote[p]))]
     pointers = [p for p in files if POINTER.match(p) and not (p in remote and _same(files[p], remote[p]))]
-    # Only what this machine publishes is kept in step: `local/`, and each embedding model it has, so Amarel's other models stay.
-    managed = tuple(sorted({"local/" if path.startswith("local/") else "/".join(path.split("/")[:2]) + "/" for path in files}))
+    managed = {"local/" if path.startswith("local/") else "/".join(path.split("/")[:2]) + "/" for path in files}
+    managed.update(_affected_remote_models(dataset, api, repo, info.sha, remote, managed))
+    managed = tuple(sorted(managed))
     stale = sorted(p for p in remote if p.startswith(managed) and p not in files)
     manifest = "local/manifest.json"
     timestamp_only = (not changed and not stale and pointers == [manifest] and manifest in remote
@@ -434,17 +510,20 @@ def main(argv=None) -> int:
     parser.add_argument("--repo", default=os.environ.get("HF_DATASET_REPO", "thomasedisonpapers/edison-papers"))
     parser.add_argument("--check-only", action="store_true", help="Run the boundary check and stop")
     parser.add_argument("--dry-run", action="store_true", help="Show what would be sent, removed and kept, without changing anything")
+    parser.add_argument("--embedding-model", choices=("arctic-embed-s", "qwen3-embedding-0.6b", "none"),
+                        help="Publish this local model only, or use 'none' to publish records independently")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     if args.check_only:
-        problems = check(args.dataset)
+        problems = check(args.dataset, embedding_model=args.embedding_model)
         for problem in problems:
             logger.error("refused: %s", problem)
         logger.info("boundary check: %s", "failed" if problems else "passed")
         return 1 if problems else 0
     from huggingface_hub import HfApi
     try:
-        print(json.dumps(upload(args.dataset, args.repo, HfApi(token=os.environ.get("HF_TOKEN") or None), dry_run=args.dry_run)))
+        print(json.dumps(upload(args.dataset, args.repo, HfApi(token=os.environ.get("HF_TOKEN") or None),
+                                dry_run=args.dry_run, embedding_model=args.embedding_model)))
     except UploadError as error:
         logger.error("refused: %s", error)
         return 1

@@ -286,3 +286,19 @@ def test_a_model_without_an_onnx_export_is_refused_for_the_host():
 
 def test_the_host_model_is_pinned_to_an_exact_revision():
     assert len(embed.MODELS["arctic-embed-s"]["onnx"]["revision"]) == 40
+
+
+def test_an_onnx_encode_with_no_remaining_chunks_does_not_load_the_model(tmp_path, monkeypatch):
+    def unavailable(*args, **kwargs):
+        raise embed.EmbedError("model unavailable")
+
+    monkeypatch.setattr(embed, "load_onnx_encoder", unavailable)
+    assert embed.main(["encode", "--store", str(tmp_path), "--model", MODEL, "--backend", "onnx"]) == 0
+
+
+def test_query_evaluation_uses_the_selected_onnx_backend(tmp_path, monkeypatch):
+    lines = tmp_path / "queries.txt"
+    lines.write_text("search query\n", encoding="utf-8")
+    monkeypatch.setattr(embed, "load_onnx_encoder", lambda *args, **kwargs: _fake_encoder([]))
+    assert embed.main(["queries", "--store", str(tmp_path), "--model", MODEL, "--backend", "onnx",
+                       "--queries", str(lines)]) == 0
