@@ -8,6 +8,7 @@ from PIL import Image
 
 import build
 import textindex
+from passage import key_of, passages
 
 FIXTURE = json.loads((Path(__file__).resolve().parents[1] / "fixtures" / "tokenize.json").read_text("utf-8"))
 
@@ -434,17 +435,28 @@ def test_no_more_than_six_related_documents_are_listed():
     assert len(build.related_ordinals("D0", {"D0": list(ids)}, ids)) == build.RELATED_COUNT
 
 
-def _store(tmp, ids=("E2002AAA", "E2002AAB", "E2002ZZZ"), dim=384):
+def _store(tmp, ids=("E2002AAA", "E2002AAB", "E2002ZZZ"), dim=384, *, include_transcription=False):
     import numpy as np
     root = tmp / "dataset" / "embeddings" / "arctic-embed-s"
     (root / "parts").mkdir(parents=True, exist_ok=True)
-    keys = [f"k{n}" for n in range(len(ids))]
-    vectors = np.zeros((len(ids), dim), dtype=np.float16)
+    records, _ = build.load_local(tmp / "dataset")
+    documents = []
+    for document_id in ids:
+        if document_id in records:
+            record = records[document_id]
+            record["description"] = build.description_for(record, {})
+            texts = passages(record)
+            keys = [key_of(text) for text in (texts if include_transcription else texts[:1])]
+        else:
+            keys = [key_of(document_id)]
+        documents.append({"id": document_id, "keys": keys})
+    keys = list(dict.fromkeys(key for document in documents for key in document["keys"]))
+    vectors = np.zeros((len(keys), dim), dtype=np.float16)
     vectors[:, 0] = 1.0
     np.save(root / "parts" / "part-00000.npy", vectors)
     (root / "parts" / "part-00000.keys").write_text("\n".join(keys) + "\n", "utf-8")
-    (root / "manifest.json").write_text(json.dumps({"parts": [{"name": "part-00000", "count": len(ids)}]}), "utf-8")
-    (root / "documents.jsonl").write_text("".join(json.dumps({"id": i, "keys": [k]}) + "\n" for i, k in zip(ids, keys)), "utf-8")
+    (root / "manifest.json").write_text(json.dumps({"parts": [{"name": "part-00000", "count": len(keys)}]}), "utf-8")
+    (root / "documents.jsonl").write_text("".join(json.dumps(document) + "\n" for document in documents), "utf-8")
 
 
 def _vector_meta(tmp):
@@ -455,6 +467,17 @@ def test_a_build_writes_a_vector_for_each_passage_of_its_documents(dataset):
     _store(dataset)
     _build(dataset)
     assert _vector_meta(dataset)["count"] == 2
+
+
+def test_an_edited_description_leaves_only_the_unchanged_transcription_vector(dataset):
+    _store(dataset, ids=("E2002AAA",), include_transcription=True)
+    path = dataset / "dataset" / "local" / "E2002AAA" / "record.json"
+    record = json.loads(path.read_text("utf-8"))
+    record["description"] = "A new editorial abstract."
+    path.write_text(json.dumps(record), "utf-8")
+
+    _build(dataset)
+    assert _vector_meta(dataset)["count"] == 1
 
 
 def test_passage_vectors_are_stored_as_signed_bytes(dataset):

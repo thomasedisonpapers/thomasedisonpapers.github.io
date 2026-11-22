@@ -19,6 +19,7 @@ from PIL import Image
 
 import describe
 import textindex
+from passage import key_of, passages
 
 logger = logging.getLogger("build")
 
@@ -125,8 +126,8 @@ SEARCH_MODEL = {"name": "arctic-embed-s", "hf": "Snowflake/snowflake-arctic-embe
 _PART_NAME = re.compile(r"^part-\d{5}$")
 
 
-def write_vectors(dataset: Path, target: Path, ordinal_of_id: dict[str, int]) -> int:
-    """Writes every passage vector of the documents in this build as signed bytes, with each passage's document ordinal; returns the count."""
+def write_vectors(dataset: Path, target: Path, records: dict, ordinal_of_id: dict[str, int]) -> int:
+    """Writes vectors that still match published passages, with their document ordinals."""
     import numpy as np
 
     root = dataset / "embeddings" / SEARCH_MODEL["name"]
@@ -153,14 +154,17 @@ def write_vectors(dataset: Path, target: Path, ordinal_of_id: dict[str, int]) ->
             if not line.strip():
                 continue
             document = json.loads(line)
-            ordinal = ordinal_of_id.get(document.get("id"))
+            document_id = document.get("id")
+            ordinal = ordinal_of_id.get(document_id)
             if ordinal is None:
                 continue
+            current = {key_of(text) for text in passages(records[document_id])}
             for key in document.get("keys", []):
                 if key not in row_of:
-                    raise BuildError(f"{document['id']} refers to a missing semantic passage vector")
-                rows.append(row_of[key])
-                owners.append(ordinal)
+                    raise BuildError(f"{document_id} refers to a missing semantic passage vector")
+                if key in current:
+                    rows.append(row_of[key])
+                    owners.append(ordinal)
     if not rows:
         return 0
     matrix = np.concatenate(blocks).astype(np.float32)
@@ -583,9 +587,9 @@ def build(dataset: Path, web: Path, out: Path, *, allow_shrink: bool = False, da
                "recent": [ordinal_of[r["id"]] for r in recent[:12]], "hero": hero,
                "sources": {"local": len(local), "edisondigital": len(remote)},
                "local_published_at": manifest.get("generated_at", "")}
-    passages = write_vectors(dataset, site_data / "vectors", ordinal_of_id)
-    if passages:
-        logger.info("wrote %d passage vectors for search by meaning", passages)
+    vector_count = write_vectors(dataset, site_data / "vectors", records, ordinal_of_id)
+    if vector_count:
+        logger.info("wrote %d passage vectors for search by meaning", vector_count)
     write_json(site_data / "catalog.json", catalog)
     revision = hashlib.sha256(json.dumps([catalog, sorted(shards)], sort_keys=True).encode()).hexdigest()[:16]
     final = data_root / revision
