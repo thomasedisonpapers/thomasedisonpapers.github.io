@@ -215,7 +215,7 @@ export async function mountResults(root, { base = "", placeholder = "Search the 
       if (mine !== request) return;
       let { kept, counts } = applyFilters(result.ordinals, facets, filters);
       // The query as typed, kept so that meaning matches can take the place of the "most of your words" fallback.
-      const strict = { result, kept, counts, query, own };
+      const strict = { result, kept, query, own };
       let broadened = false;
       let meaningOnly = false;
       // No document holds every word: show the ones holding most of them, best first, and say so, as search engines do.
@@ -281,11 +281,15 @@ export async function mountResults(root, { base = "", placeholder = "Search the 
         const cutoff = meaningCutoff(best);
         const closest = topMatches(best, { cutoff, limit: Infinity });
         if (closest.length || (broadened && strict.result.ordinals.length)) {
-          const inScope = applyFilters(closest, facets, filters).kept;
           if (broadened) {
-            ({ result, kept, counts, query, own } = strict);
+            ({ result, kept, query, own } = strict);
             broadened = false;
           }
+          // Count all qualifying matches so the result cap cannot disable a filter.
+          const candidates = new Set([...result.ordinals, ...closest]);
+          const { kept: matching, counts: facetCounts } = applyFilters(candidates, facets, filters);
+          const allowed = new Set(matching);
+          const inScope = closest.filter((ordinal) => allowed.has(ordinal));
           meaningOnly = !kept.length && inScope.length > 0;
           const found = new Set(kept);
           // Cap semantic additions after filtering, so overlapping keyword matches never consume their slots.
@@ -298,9 +302,7 @@ export async function mountResults(root, { base = "", placeholder = "Search the 
             { weight: (list, ordinal) => list === 0 ? keywordWeight(best.get(ordinal), cutoff) : 1 });
           const order = sort ? sortResults(union, sort, result.scores, facets)
             : union.slice().sort((a, b) => (fused.get(b) || 0) - (fused.get(a) || 0) || (best.get(b) ?? -1) - (best.get(a) ?? -1) || a - b);
-          const globalAdditions = additions(closest, new Set(result.ordinals));
-          const candidates = [...new Set([...result.ordinals, ...globalAdditions, ...fresh])];
-          page = await present(union, applyFilters(candidates, facets, filters).counts, order, {
+          page = await present(union, facetCounts, order, {
             meaning, extra: fresh.length && !meaningOnly ? `Also showing ${plural(fresh.length, "document")} that match by meaning.` : "" });
         }
       } catch {
@@ -427,7 +429,7 @@ export async function mountResults(root, { base = "", placeholder = "Search the 
       ${group("status", "Transcription", values("status", "status", (s) => (STATUS[s] ? STATUS[s].label : s)) + `<div class="facet-help">${statusHelp()}</div>`)}
       ${group("type", "Document type", values("type", "type", (t) => t))}
       ${group("folder", "Collection", values("folder", "collection", (f) => folderTitles[f] || f))}
-      <button type="button" class="btn primary refine-done">Show results</button>`;
+      <button type="button" id="refine-done" class="btn primary refine-done">Show results</button>`;
     renderChips();
     refine.querySelectorAll(".hist span[data-h]").forEach((bar) => { bar.style.height = `${Math.max(2, Number(bar.dataset.h))}%`; });
     const host = refine.querySelector(".range-host");
