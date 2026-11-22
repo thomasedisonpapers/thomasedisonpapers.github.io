@@ -72,6 +72,13 @@ def test_an_abstract_quoting_a_later_sentence_is_kept():
     assert describe.describe(record(text, abstract)) == abstract
 
 
+def test_an_abstract_matching_a_stamp_on_a_later_page_is_kept():
+    abstract = "Received during the ownership review of several outstanding deeds."
+    text = ("I am writing to give you the latest figures on the factory tests and our new storage batteries."
+            f"\n\n[page 2]\n\n[Stamp] {abstract}")
+    assert describe.describe(record(text, abstract)) == abstract
+
+
 def test_editors_notes_that_quote_the_transcription_are_kept():
     note = "Cie CONTINENTALE EDISON SOCIÉTÉ ANONYME Au Capital de 1 Million de Francs."
     assert describe.describe({**record(LETTERHEAD, note), "editors_notes": note}) == note
@@ -84,6 +91,14 @@ def test_a_harvested_abstract_is_kept_even_when_it_matches_the_letterhead():
 
 def test_a_description_skips_a_letterhead_with_windows_line_endings():
     assert describe.opening_sentence(LETTERHEAD.replace("\n", "\r\n")).startswith("We confirm our respects")
+
+
+def test_a_publisher_fallback_based_on_windows_line_endings_is_replaced():
+    body = "I enclose the new report about the storage batteries and all of our recent tests."
+    text = ("[Letterhead] The excellent automatic supply company\r\nThirty seven Grafton Street, New York"
+            f"\r\n\r\nDear Sir,\r\n\r\n{body}")
+    original = f"The excellent automatic supply company Thirty seven Grafton Street, New York Dear Sir, {body}"
+    assert describe.describe(record(text, original)) == body
 
 
 def test_a_short_body_does_not_make_the_description_fall_back_to_the_address():

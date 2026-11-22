@@ -222,6 +222,14 @@ def merge(local: dict, remote: dict) -> tuple[dict, list[str]]:
     return merged, conflicts
 
 
+def description_for(record: dict, harvested: dict) -> str:
+    """Resolve the description shared by the public catalogue and its embeddings."""
+    original = harvested.get("description")
+    if original and record.get("description") == original:
+        return original
+    return describe.describe(record)
+
+
 def document_terms(record: dict) -> dict[str, int]:
     folder = record.get("folder") or {}
     return textindex.document_terms({
@@ -456,9 +464,7 @@ def build(dataset: Path, web: Path, out: Path, *, allow_shrink: bool = False, da
                     raise BuildError(f"{record['id']} page {page.get('n')} has no {size} file at {path}")
         if record.get("pdf") and not has_file(record["pdf"]):
             raise BuildError(f"{record['id']} has no PDF file at {record['pdf']}")
-        harvested = remote.get(record["id"], {})
-        if not harvested.get("description") or record.get("description") != harvested["description"]:
-            record["description"] = describe.describe(record)
+        record["description"] = description_for(record, remote.get(record["id"], {}))
     report_shared_scans(shared_scans(records))
 
     previous_pointer = out / "data" / "current.json"

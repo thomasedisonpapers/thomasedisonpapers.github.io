@@ -86,10 +86,16 @@ def in_scope(record: dict, scope: str) -> bool:
 def wanted(dataset: Path, scope: str) -> dict[str, list[tuple[str, str]]]:
     """Each in-scope document's passages as (key, text), read from the same merged public records the site is built from."""
     local, manifest = build.load_local(dataset)
-    records, _ = build.merge(local, build.load_edisondigital(dataset))
+    remote = build.load_edisondigital(dataset)
+    records, _ = build.merge(local, remote)
     for document_id in manifest.get("withdrawn", []):
         records.pop(document_id, None)
-    return {doc: [(key_of(t), t) for t in passages(r)] for doc, r in sorted(records.items()) if in_scope(r, scope)}
+    planned = {}
+    for document_id, record in sorted(records.items()):
+        if in_scope(record, scope):
+            record["description"] = build.description_for(record, remote.get(document_id, {}))
+            planned[document_id] = [(key_of(text), text) for text in passages(record)]
+    return planned
 
 
 def _write_json(path: Path, value) -> None:

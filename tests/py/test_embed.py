@@ -72,6 +72,16 @@ def test_the_approved_scope_leaves_drafts_out(tmp_path):
     assert list(embed.wanted(dataset, "approved")) == ["E2002AAA"]
 
 
+def test_the_catalogue_passage_uses_the_public_description(tmp_path):
+    letterhead = "The excellent automatic supply company, Thirty seven Grafton Street, New York."
+    body = "I enclose the new report about the storage batteries and all of our recent tests."
+    record = _record("E2002AAA", description=letterhead, transcription=f"[Letterhead] {letterhead}\n\nDear Sir,\n\n{body}")
+    dataset = _dataset(tmp_path, [record])
+
+    expected = f"{embed.heading(record)} {body}"
+    assert embed.wanted(dataset, "approved")[record["id"]][0] == (embed.key_of(expected), expected)
+
+
 def test_a_withdrawn_document_is_never_embedded(tmp_path):
     dataset = _dataset(tmp_path, [_record("E2002AAA"), _record("E2002AAB")], withdrawn=["E2002AAB"])
     assert list(embed.wanted(dataset, "all")) == ["E2002AAA"]

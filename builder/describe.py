@@ -112,13 +112,18 @@ def _excerpt(line: str, sentence_pattern: re.Pattern) -> str:
 
 
 def _generated_description(current: str, text: str) -> bool:
-    """Matches the publisher's fallback or a tagged block of printed matter."""
-    blocks = _blocks(_line_endings(text), skip_printed=False)
+    """Matches the publisher's fallback or opening tagged printed matter."""
     normalized = _plain(current)
+    opening = _blocks(_line_endings(text), skip_printed=False)
+    if opening:
+        first = opening[0]
+        if _LETTERHEAD.match(first[0]) or _ADDED.match(first[0]):
+            printed = " ".join(_TAG.sub("", line) for line in first)
+            if _plain(printed) == normalized:
+                return True
+    # Replay the publisher's paragraph grouping with the stored line endings.
+    blocks = _blocks(text, skip_printed=False)
     paragraphs = [" ".join(" ".join(_TAG.sub("", line) for line in block).split()) for block in blocks]
-    if any((_LETTERHEAD.match(block[0]) or _ADDED.match(block[0])) and _plain(line) == normalized
-           for block, line in zip(blocks, paragraphs)):
-        return True
     for minimum in (15, 6):
         for line in paragraphs:
             if len(line.split()) >= minimum and not _shouting(line):
