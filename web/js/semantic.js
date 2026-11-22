@@ -26,22 +26,44 @@ export function scorePassages(query, vectors, ordinals, dim, scale = 127) {
   return best;
 }
 
-/** The documents close enough in meaning to show: above a floor, near the best match, and no more than `limit`. */
-export function topMatches(best, { limit = 40, floor = 0.5, within = 0.12, allowed = null } = {}) {
-  const ranked = [...best.entries()]
-    .filter(([ordinal]) => !allowed || allowed.has(ordinal))
-    .sort((a, b) => b[1] - a[1]);
-  if (!ranked.length) return [];
-  const cutoff = Math.max(floor, ranked[0][1] - within);
-  return ranked.filter(([, score]) => score >= cutoff).slice(0, limit).map(([ordinal]) => ordinal);
+function median(values) {
+  const sorted = Float64Array.from(values).sort();
+  return sorted.length ? sorted[sorted.length >> 1] : 0;
 }
 
-/** Reciprocal Rank Fusion: a document scores the sum of 1 / (k + rank) over each list it appears in. */
-export function fuse(lists, k = 60) {
+/**
+ * The lowest similarity that still counts as a match, or null when even the best is weak.
+ * How similar an unrelated document looks depends on the query, so a match must sit in the top `band` of the gap
+ * between the archive's typical document and the best one, as well as within `within` of the best.
+ */
+export function meaningCutoff(best, { floor = 0.55, within = 0.12, band = 0.4 } = {}) {
+  let top = -Infinity;
+  for (const score of best.values()) if (score > top) top = score;
+  if (!(top >= floor)) return null;
+  const typical = median(best.values());
+  return Math.max(top - within, top - band * Math.max(0, top - typical));
+}
+
+/** The documents close enough in meaning to show, best first, and no more than `limit`. */
+export function topMatches(best, { limit = 40, allowed = null, cutoff, ...options } = {}) {
+  const threshold = cutoff === undefined ? meaningCutoff(best, options) : cutoff;
+  if (threshold === null) return [];
+  return [...best.entries()]
+    .filter(([ordinal, score]) => score >= threshold && (!allowed || allowed.has(ordinal)))
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, limit).map(([ordinal]) => ordinal);
+}
+
+export function keywordWeight(similarity, cutoff) {
+  return cutoff !== null && Number.isFinite(similarity) && similarity < cutoff ? 0.5 : 1;
+}
+
+/** Reciprocal Rank Fusion: a document scores the sum of weight / (k + rank) over each list it appears in. */
+export function fuse(lists, { k = 60, weight = () => 1 } = {}) {
   const scores = new Map();
-  for (const list of lists) {
-    list.forEach((ordinal, rank) => scores.set(ordinal, (scores.get(ordinal) || 0) + 1 / (k + rank + 1)));
-  }
+  lists.forEach((list, which) => {
+    list.forEach((ordinal, rank) => scores.set(ordinal, (scores.get(ordinal) || 0) + weight(which, ordinal) / (k + rank + 1)));
+  });
   return scores;
 }
 

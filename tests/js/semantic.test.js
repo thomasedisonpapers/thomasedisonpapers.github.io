@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { parseQuery } from "../../web/js/search.js";
-import { eligible, fuse, meaningText, scorePassages, topMatches } from "../../web/js/semantic.js";
+import { eligible, fuse, keywordWeight, meaningCutoff, meaningText, scorePassages, topMatches } from "../../web/js/semantic.js";
 
 const ask = (text, mode = "all") => eligible(parseQuery(text, mode), text);
 
@@ -43,12 +43,23 @@ test("a document scores its best passage", () => {
   assert.equal(Math.round(scorePassages([1, 0], vectors, Uint32Array.from([5, 5, 6]), 2).get(5) * 100), 100);
 });
 
+// An archive where most documents sit at `typical`, as unrelated documents do for any one query.
+const archive = (matches, typical = 0.43) => new Map([...Array.from({ length: 30 }, (_, n) => [100 + n, typical]), ...matches]);
+
 test("documents far below the best match are not shown", () => {
-  assert.deepEqual(topMatches(new Map([[1, 0.8], [2, 0.75], [3, 0.6]])), [1, 2]);
+  assert.deepEqual(topMatches(archive([[1, 0.8], [2, 0.75], [3, 0.6]], 0.3)), [1, 2]);
+});
+
+test("a match must stand out from the archive's typical document, not merely sit near the best (regression: off-topic minutes for concrete houses, smoke test 21 November)", () => {
+  assert.deepEqual(topMatches(archive([[1, 0.674], [2, 0.628], [3, 0.575]])), [1, 2]);
 });
 
 test("nothing is shown when even the best match is weak", () => {
   assert.deepEqual(topMatches(new Map([[1, 0.4], [2, 0.3]])), []);
+});
+
+test("nothing is shown when the best match falls short of 0.55", () => {
+  assert.deepEqual(topMatches(archive([[1, 0.54]], 0.42)), []);
 });
 
 test("no more than the limit are shown", () => {
@@ -56,12 +67,30 @@ test("no more than the limit are shown", () => {
 });
 
 test("the shortlist limit leaves room for matches inside the selected collection", () => {
-  const scores = new Map(Array.from({ length: 40 }, (_, n) => [n, 0.9 - n * 0.001]));
-  scores.set(40, 0.72);
+  const scores = new Map(Array.from({ length: 120 }, (_, n) => [n, n < 40 ? 0.9 - n * 0.001 : 0.3]));
+  scores.set(40, 0.84);
   assert.deepEqual(topMatches(scores, { allowed: new Set([40]) }), [40]);
+});
+
+test("a filter cannot lower the archive-wide cutoff and admit weaker matches", () => {
+  const scores = archive([[1, 0.86], ...Array.from({ length: 15 }, (_, n) => [n + 2, 0.58])], 0.25);
+  assert.deepEqual(topMatches(scores, { allowed: new Set(Array.from({ length: 15 }, (_, n) => n + 2)) }), []);
 });
 
 test("a document found both ways outranks one found only one way", () => {
   const scores = fuse([[1, 2], [3, 1]]);
   assert.ok(scores.get(1) > scores.get(2) && scores.get(1) > scores.get(3));
+});
+
+test("a keyword match counted at half weight falls below the best meaning match (regression: unrelated letter first for hearing loss, smoke test 21 November)", () => {
+  const scores = fuse([[9], [1]], { weight: (list) => (list === 0 ? keywordWeight(0.4, 0.7) : 1) });
+  assert.ok(scores.get(1) > scores.get(9));
+});
+
+test("a keyword match without an embedding retains its full weight", () => {
+  assert.equal(keywordWeight(undefined, 0.7), 1);
+});
+
+test("the cutoff is the best match itself when no document is typical of the archive", () => {
+  assert.equal(meaningCutoff(new Map([[1, 0.7], [2, 0.7]])), 0.7);
 });

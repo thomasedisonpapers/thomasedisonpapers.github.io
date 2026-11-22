@@ -249,22 +249,53 @@ export function header(current, { search = true } = {}) {
   el.innerHTML = `<a class="skip" href="#main">Skip to content</a><div class="wrap">
     <a class="brand" href="index.html" aria-label="The Edison Papers, home"><img src="${esc(LOGO)}" alt="">
       <span class="brand-name">The Edison Papers<small>Rutgers University</small></span></a>
-    <nav class="site-nav" aria-label="Main">${NAV.map(([href, label]) =>
-      `<a href="${href}"${href === current ? ' aria-current="page"' : ""}>${label}</a>`).join("")}</nav>
-    <div class="header-tools">
-      ${search ? `<form class="header-search" action="search.html" role="search"><label class="field">${icon("search")}
-        <span class="sr-only">Search the archive</span><input name="q" type="search" placeholder="Search the archive" autocomplete="off"></label></form>` : ""}
-      <button class="theme-toggle" type="button">${themeLabel()}</button></div></div>`;
+    <button class="menu-toggle" type="button" aria-expanded="false" aria-controls="site-menu">${icon("menu")}<span>Menu</span></button>
+    <div class="header-menu" id="site-menu">
+      <nav class="site-nav" aria-label="Main">${NAV.map(([href, label]) =>
+        `<a href="${href}"${href === current ? ' aria-current="page"' : ""}>${label}</a>`).join("")}</nav>
+      <div class="header-tools">
+        ${search ? `<form class="header-search" action="search.html" role="search"><label class="field">${icon("search")}
+          <span class="sr-only">Search the archive</span><input name="q" type="search" placeholder="Search the archive" autocomplete="off"></label></form>` : ""}
+        <button class="theme-toggle" type="button">${themeLabel()}</button></div></div></div>`;
   const toggle = el.querySelector(".theme-toggle");
   toggle.addEventListener("click", () => {
-    const next = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
-    document.documentElement.dataset.theme = next;
+    const root = document.documentElement;
+    const next = root.dataset.theme === "dark" ? "light" : "dark";
+    root.dataset.themeOverride = next;
+    root.dataset.theme = next;
     try { localStorage.setItem("archive-theme", next); } catch { /* a private window keeps the choice for this page only */ }
-    toggle.innerHTML = themeLabel();
   });
+  // The label follows the theme however it changed: this button, or the system setting when no choice is saved.
+  new MutationObserver(() => { toggle.innerHTML = themeLabel(); }).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+  wireMenu(el);
   const q = param("q");
   const box = el.querySelector(".header-search input");
   if (q && box && current === "search.html") box.value = q;
+}
+
+// On narrow screens the links, search and theme sit behind a Menu button, which closes on Escape, outside clicks and wider windows.
+function wireMenu(el) {
+  const button = el.querySelector(".menu-toggle");
+  const menu = el.querySelector(".header-menu");
+  const fitMenu = () => menu.style.setProperty("--menu-top", `${Math.ceil(el.getBoundingClientRect().bottom)}px`);
+  const setOpen = (open) => {
+    button.setAttribute("aria-expanded", String(open));
+    menu.classList.toggle("open", open);
+  };
+  button.addEventListener("click", () => {
+    const open = button.getAttribute("aria-expanded") !== "true";
+    setOpen(open);
+    if (open) {
+      fitMenu();
+      (menu.querySelector("a, input, button") || menu).focus();
+    }
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && menu.classList.contains("open")) { setOpen(false); button.focus(); }
+  });
+  document.addEventListener("click", (event) => { if (!el.contains(event.target)) setOpen(false); });
+  window.addEventListener("resize", () => { if (menu.classList.contains("open")) fitMenu(); });
+  window.matchMedia("(min-width: 981px)").addEventListener("change", (event) => { if (event.matches) setOpen(false); });
 }
 
 export async function footer() {

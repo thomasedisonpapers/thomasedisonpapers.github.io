@@ -84,6 +84,20 @@ test("only the search bar's submit button is painted blue, never its scope menu 
   assert.equal(rule(".searchbar button"), "");
 });
 
+const narrow = css.slice(css.indexOf("@media (max-width: 980px)"), css.indexOf("@media (max-width: 600px)"));
+
+test("on narrow screens the main links fold into the Menu panel instead of vanishing (regression: no menu on phones, smoke test 21 November)", () => {
+  assert.doesNotMatch(narrow, /\.site-nav \{ display: none; \}/);
+});
+
+test("on narrow screens the header's search and theme button drop into a panel, off the header's row (regression: Dark button off-screen at 375 px, smoke test 21 November)", () => {
+  assert.match(narrow, /\.header-menu \{[^}]*position: absolute/);
+});
+
+test("on narrow screens the filters stay folded until asked for, so results come first (regression: results three screens down on phones, smoke test 21 November)", () => {
+  assert.match(narrow, /\.refine:not\(\.open\) \{ display: none; \}/);
+});
+
 // The site must work unchanged at any address, so a later move from github.io to a domain breaks nothing.
 const BUILDER = new URL("../../builder/", import.meta.url);
 const ownFiles = [...pages, ...scripts.map((s) => `js/${s}`), "css/site.css"];

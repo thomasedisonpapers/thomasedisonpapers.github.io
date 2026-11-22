@@ -1,7 +1,7 @@
 // The search experience shared by the search page and topic pages: query, refine sidebar, results, views and paging.
 import { catalog, dataUrl, esc, fetchJSON, icon, indexMeta, plural, sources, statusHelp, summaries, wireHelp, STATUS } from "./core.js";
 import { documentEntry } from "./cards.js";
-import { createSemantic, eligible, fuse, meaningText, topMatches } from "./semantic.js";
+import { createSemantic, eligible, fuse, keywordWeight, meaningCutoff, meaningText, topMatches } from "./semantic.js";
 import { enhanceSelect, rangeSlider } from "./controls.js";
 import { Index, applyFilters, describeQuery, highlight, maskFields, parseQuery, runQuery, setStopwords, setVariants, sortResults, suggest } from "./search.js";
 
@@ -69,8 +69,9 @@ export async function mountResults(root, { base = "", placeholder = "Search the 
       </div>
       <div class="advanced" id="advanced" hidden></div>
     </form>
+    <button type="button" class="btn filters-toggle" aria-expanded="false" aria-controls="refine-panel">${icon("funnel")}<span>Filters</span></button>
     <div class="search-layout">
-      <aside class="refine" aria-label="Refine results"></aside>
+      <aside class="refine" id="refine-panel" aria-label="Refine results"></aside>
       <section aria-labelledby="results-count">
         <div class="results-bar">
           <div class="count-line" id="results-count" tabindex="-1" aria-live="polite"></div>
@@ -106,6 +107,21 @@ export async function mountResults(root, { base = "", placeholder = "Search the 
   const form = root.querySelector("form");
   const input = root.querySelector("#q");
   const refine = root.querySelector(".refine");
+  // On narrow screens the filters fold away behind a button, so the results are the first thing below the search box.
+  const filtersButton = root.querySelector(".filters-toggle");
+  const showFilters = (open) => {
+    filtersButton.setAttribute("aria-expanded", String(open));
+    refine.classList.toggle("open", open);
+  };
+  filtersButton.addEventListener("click", () => showFilters(filtersButton.getAttribute("aria-expanded") !== "true"));
+  // The panel's own Show results button closes it and takes the reader to what the filters left.
+  refine.addEventListener("click", (event) => {
+    if (!event.target.closest(".refine-done")) return;
+    showFilters(false);
+    const count = root.querySelector("#results-count");
+    count.scrollIntoView({ block: "start" });
+    count.focus({ preventScroll: true });
+  });
   const sync = () => {
     input.value = state.q;
     root.querySelector(`input[name=mode][value="${state.mode}"]`).checked = true;
@@ -198,7 +214,10 @@ export async function mountResults(root, { base = "", placeholder = "Search the 
       let result = await runQuery(query, index, meta);
       if (mine !== request) return;
       let { kept, counts } = applyFilters(result.ordinals, facets, filters);
+      // The query as typed, kept so that meaning matches can take the place of the "most of your words" fallback.
+      const strict = { result, kept, counts, query, own };
       let broadened = false;
+      let meaningOnly = false;
       // No document holds every word: show the ones holding most of them, best first, and say so, as search engines do.
       if (!kept.length && state.mode === "all" && own.clauses.filter((c) => !c.negate).length > 1) {
         const loose = parseQuery(state.q, "any");
@@ -227,8 +246,9 @@ export async function mountResults(root, { base = "", placeholder = "Search the 
         const details = root.querySelector("#details");
         const notes = own.notes || [];
         details.hidden = !(own.clauses.length || own.yearFrom || notes.length);
-        details.innerHTML = `${icon("info")} ${broadened ? "No document has all of your words, so these have most of them, best matches first. "
-          : ""}${esc(describeQuery(own))}${notes.length ? ` ${notes.map(esc).join(" ")}` : ""}${extra ? ` ${esc(extra)}` : ""}`;
+        const lead = meaningOnly ? "No document has all of your words, so these are the documents closest in meaning."
+          : `${broadened ? "No document has all of your words, so these have most of them, best matches first. " : ""}${describeQuery(own)}`;
+        details.innerHTML = `${icon("info")} ${esc(lead)}${notes.length ? ` ${notes.map(esc).join(" ")}` : ""}${extra ? ` ${esc(extra)}` : ""}`;
         rowsEl.innerHTML = items.length ? items.map((s) => documentEntry(s, dataset[0], {
           title: highlight(s.title, query, esc), description: s.description ? highlight(s.description, query, esc) : null,
           matched: query.clauses.length && !meaning.has(s.ordinal) ? maskFields(result.where.get(s.ordinal) || 0).join(", ") : "",
@@ -258,18 +278,30 @@ export async function mountResults(root, { base = "", placeholder = "Search the 
       try {
         const best = await semantic.search(meaningText(state.q));
         if (mine !== request) return;
-        const allowed = new Set(applyFilters([...best.keys()], facets, filters).kept);
-        const byMeaning = topMatches(best, { allowed });
-        const found = new Set(kept);
-        const fresh = byMeaning.filter((ordinal) => !found.has(ordinal));
-        if (byMeaning.length) {
+        const cutoff = meaningCutoff(best);
+        const closest = topMatches(best, { cutoff, limit: Infinity });
+        if (closest.length || (broadened && strict.result.ordinals.length)) {
+          const inScope = applyFilters(closest, facets, filters).kept;
+          if (broadened) {
+            ({ result, kept, counts, query, own } = strict);
+            broadened = false;
+          }
+          meaningOnly = !kept.length && inScope.length > 0;
+          const found = new Set(kept);
+          // Cap semantic additions after filtering, so overlapping keyword matches never consume their slots.
+          const additions = (ordinals, keywords) => ordinals.filter((ordinal) => !keywords.has(ordinal)).slice(0, 40);
+          const fresh = additions(inScope, found);
+          const meaning = new Set(fresh);
+          const byMeaning = inScope.filter((ordinal) => found.has(ordinal) || meaning.has(ordinal));
           const union = [...kept, ...fresh];
-          const fused = fuse([sortResults(kept, "", result.scores, facets), byMeaning]);
+          const fused = fuse([sortResults(kept, "", result.scores, facets), byMeaning],
+            { weight: (list, ordinal) => list === 0 ? keywordWeight(best.get(ordinal), cutoff) : 1 });
           const order = sort ? sortResults(union, sort, result.scores, facets)
-            : union.slice().sort((a, b) => (fused.get(b) || 0) - (fused.get(a) || 0) || a - b);
-          const candidates = [...new Set([...result.ordinals, ...topMatches(best), ...byMeaning])];
+            : union.slice().sort((a, b) => (fused.get(b) || 0) - (fused.get(a) || 0) || (best.get(b) ?? -1) - (best.get(a) ?? -1) || a - b);
+          const globalAdditions = additions(closest, new Set(result.ordinals));
+          const candidates = [...new Set([...result.ordinals, ...globalAdditions, ...fresh])];
           page = await present(union, applyFilters(candidates, facets, filters).counts, order, {
-            meaning: new Set(fresh), extra: fresh.length ? `Also showing ${plural(fresh.length, "document")} that match by meaning.` : "" });
+            meaning, extra: fresh.length && !meaningOnly ? `Also showing ${plural(fresh.length, "document")} that match by meaning.` : "" });
         }
       } catch {
         // Search by meaning is an extra; when the model or vectors cannot load, the keyword results simply stand.
@@ -394,7 +426,8 @@ export async function mountResults(root, { base = "", placeholder = "Search the 
         <span>to</span><label class="sr-only" for="yt">To year</label><input id="yt" type="number" min="1800" max="1999" placeholder="To" value="${state.to || ""}"></div>`)}
       ${group("status", "Transcription", values("status", "status", (s) => (STATUS[s] ? STATUS[s].label : s)) + `<div class="facet-help">${statusHelp()}</div>`)}
       ${group("type", "Document type", values("type", "type", (t) => t))}
-      ${group("folder", "Collection", values("folder", "collection", (f) => folderTitles[f] || f))}`;
+      ${group("folder", "Collection", values("folder", "collection", (f) => folderTitles[f] || f))}
+      <button type="button" class="btn primary refine-done">Show results</button>`;
     renderChips();
     refine.querySelectorAll(".hist span[data-h]").forEach((bar) => { bar.style.height = `${Math.max(2, Number(bar.dataset.h))}%`; });
     const host = refine.querySelector(".range-host");
@@ -435,6 +468,7 @@ export async function mountResults(root, { base = "", placeholder = "Search the 
     for (const f of state.folders) chips.push(["folders", f, folderTitles[f] || f]);
     const bar = root.querySelector("#active-filters");
     bar.hidden = !chips.length;
+    filtersButton.querySelector("span").textContent = chips.length ? `Filters · ${chips.length} in use` : "Filters";
     bar.innerHTML = chips.length ? `<span class="active-label">Filtered by</span>${chips.map(([k, v, label]) => `<button type="button" class="filter-chip"
       data-k="${k}" data-v="${esc(v)}" aria-label="Remove filter ${esc(label)}" title="Remove filter: ${esc(label)}"><span>${esc(label)}</span>${icon("x")}</button>`).join("")}
       <button type="button" class="btn link" id="clear">Clear all</button>` : "";

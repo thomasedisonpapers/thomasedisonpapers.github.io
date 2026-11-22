@@ -587,9 +587,15 @@ What changes:
   - `js/semantic-worker.js` runs Snowflake's 8-bit ONNX query model (32 MB, downloaded once and cached) with vendored
     Transformers.js 4.3.2 and the WebAssembly-only ONNX Runtime (14 MB), served with the worker in the same versioned asset bundle. The page's
     security policy is unchanged, because a same-origin worker gets its own policy.
-  - `js/semantic.js` scores every passage and keeps documents within 0.12 of the best match and above 0.5 (at most
-    40). It merges them with keyword results by Reciprocal Rank Fusion (k = 60). Documents found only by meaning are
-    tagged "Matched by meaning".
+  - `js/semantic.js` scores every passage, and shows no meaning matches unless the best document reaches 0.55. The
+    archive-wide cutoff uses the top 40% of the gap between the archive's median document and the best one, within 0.12
+    of the best match. Filters apply before the limit of 40 additional results. The median matters because how alike
+    unrelated documents look changes with the query: 0.43 for "houses
+    built from poured concrete", 0.56 for "letters about hearing loss".
+  - Results are merged with keyword results by Reciprocal Rank Fusion (k = 60). A keyword match with a similarity score
+    below the meaning cutoff counts half. Documents without embeddings retain their full keyword weight.
+  - When the archive has a strict keyword or meaning match, the completed search shows only strict keyword and meaning
+    matches within the selected filters. Documents found only by meaning are tagged "Matched by meaning".
 - **When it runs:** for plain multi-word queries only. Quotes, field searches, exclusions and Exact phrase stay
   keyword-only. Keyword results always show first. A "Search by meaning" switch is on by default (off when the browser
   asks to save data), and its setting is remembered.
