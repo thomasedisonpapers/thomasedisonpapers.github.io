@@ -635,3 +635,24 @@ against 69,976 notebook scans. Every scan has an AI draft and none had been revi
   `[struck out: …]` are shown, not printed raw. A scan not yet mirrored is shown from edisondigital as an image only.
 - **Meaning search:** each scan's passages carry the book's title, date and subjects. The vectors grow from about 5,300 to
   about 25,000; notebooks will need the clustered layout described under "Scale".
+
+## Notebooks (23 November)
+
+1,047 notebooks and 69,976 scans, all drafted and none reviewed. They reuse the account-book path end to end (publisher,
+upload, build, reader); what differs:
+
+- **Decisions with the user:** scans are linked from archive.org rather than mirrored; notebooks join search by meaning only
+  after the vectors are split, so the first phase is keyword search.
+- **Publisher:** `notebook_title_parts` reads titles such as "N-80-10-15.2 (1880)" and "(NS-78-007) Phonograph" (the NS
+  code's digits are the year, the words after it the subject). Series that name a place, person or line of work are
+  subjects; "Notebooks by Edison", "Miscellaneous …" and similar filing groups are not. Each scan carries its archive.org
+  IIIF service as `iiif`.
+- **Images:** on 23 November archive.org's IIIF server timed out (504 after 60 s) on many first requests at every size,
+  repeatably, while its book-viewer images (`archive.org/download/{item}/page/n{index}_w{width}.jpg`) answered in 1–2 s.
+  The site uses the book viewer first and IIIF as the fallback. Book-viewer page index n−1 is the manifest's canvas n−1,
+  which is how our scans are numbered (checked against the N149 manifest). Pages allow `archive.org` and
+  `*.us.archive.org` images, because the book viewer redirects to a numbered server.
+- **Mirror:** never copies a scan that has `iiif`.
+- **Scale:** the build holds 88,087 entries in about 1 min 40 s; Pages data is about 150 MB (index 104 MB). Summaries are
+  written 200 to a file, so a results page scattered across the years downloads a few hundred kilobytes.
+- **Next:** the split vector layout for search by meaning, then the notebook passages encoded on Amarel.

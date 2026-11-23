@@ -124,3 +124,25 @@ test("an unmapped scan from the supported Internet Archive endpoint can be shown
 test("the builder's scan ranges are read back as the scans they name", () => {
   assert.deepEqual([...parseRanges("1-3,7")], [1, 2, 3, 7]);
 });
+
+test("a notebook scan is shown from archive.org's book viewer at the canvas the scan counts from", () => {
+  const iiif = "https://iiif.archive.org/image/iiif/3/taepnotebook-N149%2Fx.jp2";
+  assert.equal(scanPages({ id: "N149", openings: [{ n: 30, iiif }] })[0].view, "https://archive.org/download/taepnotebook-N149/page/n29_w1600.jpg");
+});
+
+test("archive.org's image server is the fallback when its book viewer image fails", () => {
+  const iiif = "https://iiif.archive.org/image/iiif/3/taepnotebook-N149%2Fx.jp2";
+  assert.equal(scanPages({ id: "N149", openings: [{ n: 1, iiif }] })[0].full, `${iiif}/full/1600,/0/default.jpg`);
+});
+
+test("a notebook image address on any other host is never loaded", () => {
+  assert.equal(scanPages({ id: "N149", openings: [{ n: 1, iiif: "https://example.com/x" }] })[0].view, "");
+});
+
+test("a search result for a notebook scan opens the notebook reader at that scan", () => {
+  assert.equal(entryHref({ id: "N149-0003", kind: "notebook", volume: "N149", scan: 4 }), "notebook.html?id=N149&scan=4");
+});
+
+test("a citation of a notebook scan names it as a notebook", () => {
+  assert.match(citation({ id: "N149", collection: "notebooks", title: "N-80-10-15.2 (1880)" }, 4, "https://x"), /Notebook N149, scan 4/);
+});

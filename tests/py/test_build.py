@@ -720,3 +720,74 @@ def test_an_opening_that_shares_an_id_with_a_document_stops_the_build(dataset):
 def test_the_book_list_says_which_scans_the_mirror_holds_as_ranges(dataset):
     _build(_account_book(dataset, scans=4, mirrored=(1, 2, 4)))
     assert _data(dataset, "volumes.json")[0]["mirrored"] == "1-2,4"
+
+
+NOTEBOOK_IIIF = "https://iiif.archive.org/image/iiif/3/taepnotebook-N149%2Ftaepnotebook-N149_0001.jp2"
+
+
+def _notebook(dataset, iiif=NOTEBOOK_IIIF):
+    """Publishes one notebook of one scan, linked from archive.org's image server, into the test dataset."""
+    root = dataset / "dataset" / "volumes"
+    page = {**LEDGER_PAGE, "lines": ["Experiment with carbon filament"], "tables": []}
+    volume = {"id": "N149", "collection": "notebooks", "title": "Notebook #149 N-80-10-15.2 (1880)", "date": "1880", "years": [1880, 1880],
+              "subjects": ["Menlo Park Notebooks"], "status": "draft", "pdf": None,
+              "openings": [{"n": 1, "id": "N149-0000", "width": 2784, "height": 3177, "status": "draft", "iiif": iiif, "source": "",
+                            "pages": [page]}]}
+    (root / "N149").mkdir(parents=True)
+    (root / "N149" / "volume.json").write_text(json.dumps(volume), "utf-8")
+    manifest = root / "manifest.json"
+    entries = json.loads(manifest.read_text("utf-8"))["volumes"] if manifest.exists() else {}
+    manifest.write_text(json.dumps({"volumes": {**entries, "N149": {}}, "withdrawn": []}), "utf-8")
+    return dataset
+
+
+def test_a_notebook_scan_is_a_searchable_entry_of_type_notebook(dataset):
+    _build(_notebook(dataset))
+    summary = next(s for s in _data(dataset, "docs/0.json") if s["id"] == "N149-0000")
+    assert (summary["kind"], summary["type"], summary["volume"], summary["scan"]) == ("notebook", "Notebook", "N149", 1)
+
+
+def test_a_notebook_scans_thumbnail_comes_from_archive_orgs_book_viewer(dataset):
+    _build(_notebook(dataset))
+    summary = next(s for s in _data(dataset, "docs/0.json") if s["id"] == "N149-0000")
+    assert summary["thumb"] == "https://archive.org/download/taepnotebook-N149/page/n0_w400.jpg"
+
+
+def test_the_book_viewer_page_index_counts_from_zero_like_the_manifests_canvases():
+    assert build.bookreader_page(NOTEBOOK_IIIF, 30) == "https://archive.org/download/taepnotebook-N149/page/n29"
+
+
+def test_a_notebook_image_address_on_any_other_host_is_not_used(dataset):
+    _build(_notebook(dataset, iiif="https://example.com/iiif/N149"))
+    assert next(s for s in _data(dataset, "docs/0.json") if s["id"] == "N149-0000")["thumb"] is None
+
+
+def test_each_volume_has_its_own_small_entry_for_the_reader(dataset):
+    _build(_account_book(dataset))
+    assert _data(dataset, "volumes/A234A.json")["count"] == 2
+
+
+def test_the_book_list_names_each_volumes_collection(dataset):
+    _build(_notebook(_account_book(dataset)))
+    assert sorted((v["id"], v["collection"]) for v in _data(dataset, "volumes.json")) == [("A234A", "accounts"), ("N149", "notebooks")]
+
+
+def test_a_linked_notebook_scan_is_never_counted_as_mirrored(dataset):
+    _build(_notebook(dataset))
+    assert _data(dataset, "volumes.json")[0]["mirrored"] == ""
+
+
+def test_experiment_numbers_are_searchable_in_notebook_transcriptions(dataset):
+    _notebook(dataset)
+    path = dataset / "dataset" / "volumes" / "N149" / "volume.json"
+    volume = json.loads(path.read_text("utf-8"))
+    volume["openings"][0]["pages"][0]["lines"] = ["Tests of a carbon filament", "Experiment 726 used a carbon filament"]
+    path.write_text(json.dumps(volume), "utf-8")
+    _build(dataset)
+    assert _data(dataset, "index/726.json")["726"] == [_ordinal(dataset, "N149-0000"), textindex.FIELDS["text"]]
+
+
+def test_a_public_dataset_with_only_notebooks_can_be_built(dataset):
+    _notebook(dataset)
+    (dataset / "dataset" / "local" / "manifest.json").write_text('{"folders": {}}', "utf-8")
+    assert _build(dataset, dataset_url="https://example.org/dataset/")["documents"] == 1

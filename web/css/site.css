@@ -457,6 +457,8 @@ body.focus-mode .reader { height: 100dvh; border: 0; border-radius: 0; box-shado
 .strip .strip-n { position: absolute; inset: auto 0 2px; font: 600 0.68rem var(--ui); color: var(--muted); text-align: center; }
 .strip img + .strip-n { display: none; }
 .collection-switch { margin: 0 0 18px; }
+.volume-find { margin: 0 0 14px; }
+.volume-find[hidden], .results .item[hidden] { display: none; }
 .download-list { display: grid; gap: 8px; }
 .download { display: flex; align-items: center; gap: 12px; padding: 12px 14px; border: 1px solid var(--hairline); border-radius: 12px; color: var(--text);
   transition: background var(--quick) var(--ease), border-color var(--quick) var(--ease); }

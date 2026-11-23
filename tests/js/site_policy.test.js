@@ -125,3 +125,9 @@ test("every icon in the sprite draws its own outline without a stylesheet", () =
   const symbols = read("img/icons.svg").match(/<symbol[^>]*>/g);
   assert.ok(symbols.every((tag) => /fill="none"/.test(tag) && /stroke="currentColor"/.test(tag)));
 });
+
+for (const page of pages) {
+  test(`${page} lets notebook thumbnails load from archive.org's book viewer and image server`, () => {
+    assert.match(policyOf(read(page)), /img-src[^;]*https:\/\/iiif\.archive\.org https:\/\/archive\.org https:\/\/\*\.us\.archive\.org/);
+  });
+}

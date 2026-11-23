@@ -140,6 +140,13 @@ def test_a_source_on_any_other_host_is_never_fetched(tmp_path):
     assert session.asked == []
 
 
+def test_the_scan_mirror_does_not_open_files_for_notebooks(tmp_path):
+    manifest = tmp_path / "volumes" / "manifest.json"
+    manifest.parent.mkdir()
+    manifest.write_text(json.dumps({"volumes": {"N149": {"collection": "notebooks"}}}), "utf-8")
+    assert mirror_scans.published_openings(tmp_path) == []
+
+
 def test_scans_of_a_book_no_longer_published_are_removed(tmp_path):
     dataset = _dataset(tmp_path)
     mirror_scans.mirror(dataset, _fetcher(FakeSession()))
@@ -203,3 +210,13 @@ def test_a_write_cut_short_leaves_no_part_file_for_the_upload_to_refuse(tmp_path
     (dataset / "scans" / "A200" / "full" / "0001.jpg.part").write_bytes(b"half")
     mirror_scans.mirror(dataset, _fetcher(FakeSession()))
     assert not list((dataset / "scans").rglob("*.part"))
+
+
+def test_a_notebook_scan_served_by_archive_org_is_never_copied(tmp_path):
+    dataset = _dataset(tmp_path, volumes=(("N149", 1),))
+    path = dataset / "volumes" / "N149" / "volume.json"
+    iiif = "https://iiif.archive.org/image/iiif/3/taepnotebook-N149%2Ftaepnotebook-N149_0001.jp2"
+    path.write_text(json.dumps({"id": "N149", "openings": [{"n": 1, "iiif": iiif, "source": f"{iiif}/full/max/0/default.jpg"}]}), "utf-8")
+    session = FakeSession()
+    mirror_scans.mirror(dataset, _fetcher(session))
+    assert session.asked == []

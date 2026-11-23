@@ -37,6 +37,9 @@ MODELS = {
 CHUNK_PASSAGES = 4096
 
 
+MEANING_COLLECTIONS = {"accounts"}
+
+
 class EmbedError(Exception):
     """A store that would be wrong or incomplete; nothing is changed."""
 
@@ -57,12 +60,13 @@ def wanted(dataset: Path, scope: str) -> dict[str, list[tuple[str, str]]]:
     records, _ = build.merge(local, remote)
     for document_id in manifest.get("withdrawn", []):
         records.pop(document_id, None)
-    # Account-book openings are searched by meaning like documents, from the same records the site builds them from.
-    build.add_openings(records, build.opening_records(build.load_volumes(dataset)))
+    # Notebooks wait for the split vector layout: their passages would quadruple the single file every visitor downloads.
+    volumes = build.load_volumes(dataset, collections=MEANING_COLLECTIONS)
+    build.add_openings(records, build.opening_records(volumes))
     planned = {}
     for document_id, record in sorted(records.items()):
         if in_scope(record, scope):
-            if record.get("kind") != "account":
+            if record.get("kind") not in build.SCAN_KINDS:
                 record["description"] = build.description_for(record, remote.get(document_id, {}))
             planned[document_id] = [(key_of(text), text) for text in passages(record)]
     return planned

@@ -3,7 +3,7 @@ import { STATUS, badge, catalog, crumbs, dataPath, dataUrl, datasetUrls, esc, fa
   sources, statusHelp, summaries, validId, wireHelp } from "./core.js";
 import { Index, fold } from "./search.js";
 import { renderTranscription } from "./transcript.js";
-import { accountHref, relatedShelf } from "./cards.js";
+import { entryHref, relatedShelf } from "./cards.js";
 import { Viewer, mobileSwitch, scanPane, wireFocus, wireMobileSwitch, wireSplitter, wireTabs } from "./reader.js";
 
 const EDISONDIGITAL = "https://edisondigital.rutgers.edu/";
@@ -20,7 +20,7 @@ async function locate(id) {
   if (ordinal === undefined) return null;
   const [summary] = await summaries([ordinal]);
   if (!summary || summary.id !== id) return null;
-  if (summary.kind === "account") return { redirect: accountHref(summary.volume, summary.scan) };
+  if (summary.kind && summary.volume) return { redirect: entryHref(summary) };
   const { revision } = await catalog();
   return loadDocument(revision, id, summary.folder);
 }

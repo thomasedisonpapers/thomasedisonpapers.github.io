@@ -523,3 +523,25 @@ def test_an_upload_that_would_remove_most_mirrored_scans_is_refused(tmp_path, mo
                   cache=tmp_path / "cache")
     with pytest.raises(upload.UploadError):
         upload.upload(_volumes(_dataset(tmp_path / "data"), scans=()), "org/repo", hub)
+
+
+def _with_iiif(dataset, iiif):
+    path = dataset / "volumes" / "A234A" / "volume.json"
+    volume = json.loads(path.read_text("utf-8"))
+    volume["collection"] = "notebooks"
+    volume["openings"][0]["iiif"] = iiif
+    volume["hash"] = _volume_hash(volume)
+    path.write_text(json.dumps(volume), "utf-8")
+    manifest = json.loads((dataset / "volumes" / "manifest.json").read_text("utf-8"))
+    manifest["volumes"]["A234A"].update(collection="notebooks", hash=volume["hash"])
+    (dataset / "volumes" / "manifest.json").write_text(json.dumps(manifest), "utf-8")
+    return dataset
+
+
+def test_a_notebook_linked_from_archive_orgs_image_server_passes_the_boundary_check(tmp_path):
+    dataset = _with_iiif(_volumes(_dataset(tmp_path)), "https://iiif.archive.org/image/iiif/3/taepnotebook-N149%2Fx.jp2")
+    assert upload.check(dataset) == []
+
+
+def test_a_notebook_image_address_on_any_other_host_is_refused(tmp_path):
+    assert upload.check(_with_iiif(_volumes(_dataset(tmp_path)), "https://example.com/iiif/x.jp2"))

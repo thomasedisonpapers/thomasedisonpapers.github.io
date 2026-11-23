@@ -45,16 +45,18 @@ VOLUME_FIELDS = {
     "schema": (int,), "years": (list,), "openings": (list,), "edisondigital": (dict, type(None)),
 }
 OPENING_FIELDS = {"n": (int,), "id": (str,), "width": (int, type(None)), "height": (int, type(None)), "source": (str,),
-                  "status": (str,), "pages": (list,), "latex": (str,), "hash": (str,)}
+                  "iiif": (str,), "status": (str,), "pages": (list,), "latex": (str,), "hash": (str,)}
 VOLUME_PAGE_FIELDS = {**dict.fromkeys(("position", "content"), (str,)),
                       **dict.fromkeys(("lines", "tables", "drawings", "people", "places"), (list,))}
 VOLUMES_MANIFEST_FIELDS = {"schema": (int,), "generated_at": (str,), "volumes": (dict,), "withdrawn": (list,)}
 VOLUME_ENTRY_FIELDS = {**dict.fromkeys(("collection", "status", "hash", "updated"), (str,)), "openings": (int,)}
-COLLECTIONS = {"accounts"}
+COLLECTIONS = {"accounts", "notebooks"}
 STATUSES = {"approved", "draft"}
 # The only hosts a scan may be mirrored from, checked again here so a bad record cannot point the mirror elsewhere.
 SCAN_SOURCE = re.compile(r"^https://(?:edisondigital\.rutgers\.edu|iiif\.archive\.org)/[^\s\\]*$")
 SCAN_FILE = re.compile(r"^scans/([A-Za-z0-9_-]+)/(thumb|full)/(\d{4})\.jpg$")
+# A notebook scan is linked from archive.org's image server, and from nowhere else.
+IIIF_SERVICE = re.compile(r"^https://iiif\.archive\.org/[^\s\\]+$")
 # Folders made to test the review platform, which must never reach the public.
 TEST_FOLDER = re.compile(r"TEST|^SPLITUI$", re.IGNORECASE)
 SAFE_ID = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -317,7 +319,8 @@ def check_volumes(dataset: Path, problems: list[str], allowed: set[str]) -> dict
                 problems.append(f"{label} has an opening with the wrong number or id")
                 continue
             source = opening.get("source")
-            if (source != "" and not SCAN_SOURCE.fullmatch(source or "")) or opening.get("status") not in STATUSES:
+            if ((source != "" and not SCAN_SOURCE.fullmatch(source or "")) or opening.get("status") not in STATUSES
+                    or ("iiif" in opening and not IIIF_SERVICE.fullmatch(opening["iiif"]))):
                 problems.append(f"{label} opening {n} has a scan source or status that is not allowed")
             for page in opening.get("pages", []):
                 page = checked_fields(page, VOLUME_PAGE_FIELDS, f"{label} opening {n} page", problems)

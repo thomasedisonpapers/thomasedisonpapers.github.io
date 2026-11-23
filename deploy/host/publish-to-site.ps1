@@ -42,7 +42,7 @@ try {
     Invoke-Step "publishing" $python @("-m", "edison_pipeline.cli", "publish", "--db", "data/extraction.db",
         "--bucket-uri", "file://./data/bucket", "--out", $Dataset, "--folders", $Folders,
         "--exports", "data/exports/new", "--site-url", $SiteUrl)
-    Invoke-Step "publishing account books" $python @("-m", "edison_pipeline.cli", "publish-volumes", "--db", "data/extraction.db",
+    Invoke-Step "publishing account books and notebooks" $python @("-m", "edison_pipeline.cli", "publish-volumes", "--db", "data/extraction.db",
         "--bucket-uri", "file://./data/bucket", "--out", $Dataset)
     $env:PYTHONPATH = $null
     $archivePython = Join-Path $Archive ".venv\Scripts\python.exe"

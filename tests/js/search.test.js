@@ -2,11 +2,15 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { Index, applyFilters, describeQuery, fnv1a, highlight, parseQuery, runQuery, setStopwords, setVariants, shardOf, sortResults, stem, suggest, tokenize } from "../../web/js/search.js";
+import { Index, applyFilters, describeQuery, fnv1a, highlight, parseQuery, runQuery, setStopwords, setVariants, shardOf, sortResults, stem, suggest, tokenize, yearBounds } from "../../web/js/search.js";
 
 const fixture = JSON.parse(readFileSync(new URL("../fixtures/tokenize.json", import.meta.url), "utf-8"));
 const stems = JSON.parse(readFileSync(new URL("../fixtures/stems.json", import.meta.url), "utf-8"));
 const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+test("the date filter can initialize for a catalogue with hundreds of thousands of entries", () => {
+  assert.deepEqual(yearBounds([0, 1870, ...Array(200_000).fill(1900), 1925]), [1870, 1925]);
+});
 
 for (const { text, terms } of fixture) {
   test(`the site tokenizes ${JSON.stringify(text)} exactly as the builder does`, () => {

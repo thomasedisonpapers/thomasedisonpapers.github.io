@@ -116,13 +116,18 @@ def published_openings(dataset: Path) -> list[tuple[str, int, str]]:
     manifest = json.loads(manifest_path.read_text("utf-8"))
     withdrawn = set(manifest.get("withdrawn", []))
     firsts, rest = [], []
-    for volume_id in sorted(manifest.get("volumes", {})):
-        if volume_id in withdrawn:
+    for volume_id, entry in sorted(manifest.get("volumes", {}).items()):
+        if volume_id in withdrawn or entry.get("collection") == "notebooks":
             continue
         if not _SAFE_ID.fullmatch(volume_id):
             raise ValueError(f"unsafe volume id {volume_id!r}")
         volume = json.loads((dataset / "volumes" / volume_id / "volume.json").read_text("utf-8"))
+        if volume.get("collection") == "notebooks":
+            continue
         for opening in sorted(volume.get("openings", []), key=lambda o: o["n"]):
+            if opening.get("iiif"):
+                # archive.org serves this scan at any size itself, so the site links to it and nothing is copied.
+                continue
             source, n = opening.get("source") or "", opening.get("n")
             parsed = urlparse(source)
             if not isinstance(n, int) or not 1 <= n <= 9999 or parsed.scheme != "https" or parsed.hostname not in SCAN_HOSTS:

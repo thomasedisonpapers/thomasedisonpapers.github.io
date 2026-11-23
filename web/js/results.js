@@ -3,7 +3,7 @@ import { catalog, dataUrl, esc, fetchJSON, icon, indexMeta, plural, sources, sta
 import { documentEntry } from "./cards.js";
 import { createSemantic, eligible, fuse, keywordWeight, meaningCutoff, meaningText, topMatches } from "./semantic.js";
 import { enhanceSelect, rangeSlider } from "./controls.js";
-import { Index, applyFilters, describeQuery, highlight, maskFields, parseQuery, runQuery, setStopwords, setVariants, sortResults, suggest } from "./search.js";
+import { Index, applyFilters, describeQuery, highlight, maskFields, parseQuery, runQuery, setStopwords, setVariants, sortResults, suggest, yearBounds } from "./search.js";
 
 const MODES = ["all", "any", "exact"];
 const ADVANCED_FIELDS = [["", "All fields"], ["title", "Title"], ["author", "Author"], ["recipient", "Recipient"], ["people", "People mentioned"],
@@ -98,9 +98,7 @@ export async function mountResults(root, { within = null, placeholder = "Search 
     </div>`;
 
   // The whole archive's date span, so the date slider's ends stay put as results change.
-  const years = facets.year.filter((y) => y > 0);
-  const firstYear = years.length ? Math.min(...years) : 1850;
-  const lastYear = years.length ? Math.max(...years) : 1950;
+  const [firstYear, lastYear] = yearBounds(facets.year);
   // Search by meaning loads only when used, and is off by default for visitors whose browser asks to save data.
   const semantic = scope ? null : createSemantic({ dataUrl, vendor: new URL("../vendor/", import.meta.url).href });
   const meaningBox = root.querySelector("#meaning");

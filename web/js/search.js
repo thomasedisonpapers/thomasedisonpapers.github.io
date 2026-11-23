@@ -280,6 +280,18 @@ export function maskFields(mask) {
   return Object.entries(FIELD_BITS).filter(([, bit]) => mask & bit).map(([name]) => FIELD_LABELS[name]);
 }
 
+export function yearBounds(years) {
+  let first = Infinity;
+  let last = -Infinity;
+  for (const year of years) {
+    if (year > 0) {
+      first = Math.min(first, year);
+      last = Math.max(last, year);
+    }
+  }
+  return first === Infinity ? [1850, 1950] : [first, last];
+}
+
 /** Facet filters and counts over the matched set; each facet's counts ignore its own selection, as catalogues do. */
 export function applyFilters(ordinals, facets, filters) {
   const passes = (doc, skip) => {

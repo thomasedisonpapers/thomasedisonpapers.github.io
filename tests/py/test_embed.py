@@ -346,3 +346,20 @@ def test_related_documents_are_returned_in_similarity_order_across_blocks(monkey
     vectors = np.array([[1, 0], [0, 1], [0.8, 0.6], [0.6, 0.8]], dtype=np.float32)
     monkeypatch.setattr(embed, "document_vectors", lambda _: (["A", "B", "C", "D"], vectors))
     assert embed.related(tmp_path, k=2, block=1)["D"] == [["C", 0.96], ["B", 0.8]]
+
+
+def test_notebook_scans_wait_for_the_split_vector_layout_before_they_are_embedded(tmp_path):
+    dataset = _with_account_book(_dataset(tmp_path, [_record("E2002AAA")]))
+    volume = {"id": "N149", "collection": "notebooks", "title": "N-80-10-15.2 (1880)", "openings": [
+        {"n": 1, "id": "N149-0000", "status": "draft", "source": "", "pages": [{"lines": ["Experiment with carbon filament"]}]}]}
+    (dataset / "volumes" / "N149").mkdir(parents=True)
+    (dataset / "volumes" / "N149" / "volume.json").write_text(json.dumps(volume), "utf-8")
+    (dataset / "volumes" / "manifest.json").write_text(json.dumps({"volumes": {"A234A": {}, "N149": {}}, "withdrawn": []}), "utf-8")
+    assert "N149-0000" not in embed.wanted(dataset, "transcribed")
+
+
+def test_embedding_planning_does_not_open_notebook_files_identified_by_the_manifest(tmp_path):
+    dataset = _with_account_book(_dataset(tmp_path, [_record("E2002AAA")]))
+    manifest = dataset / "volumes" / "manifest.json"
+    manifest.write_text(json.dumps({"volumes": {"A234A": {"collection": "accounts"}, "N149": {"collection": "notebooks"}}}), "utf-8")
+    assert set(embed.wanted(dataset, "transcribed")) == {"A234A-0000", "E2002AAA"}

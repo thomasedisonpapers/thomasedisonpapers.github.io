@@ -18,26 +18,43 @@ export function folderEntry(f, base) {
 }
 
 const VOLUME_ID = /^[A-Za-z0-9_-]+$/;
+// Each kind of bound volume: its reader page, the collections tab that lists it, and what one is called.
+export const VOLUME_KINDS = {
+  account: { page: "account.html", tab: "accounts", name: "Account book", plural: "Account books" },
+  notebook: { page: "notebook.html", tab: "notebooks", name: "Notebook", plural: "Notebooks" },
+};
+const KIND_OF_COLLECTION = { accounts: "account", notebooks: "notebook" };
 
-/** Where an account-book scan is read: the book's reader, opened at that scan. */
-export function accountHref(volume, scan) {
-  if (!VOLUME_ID.test(String(volume || ""))) return "collections.html#accounts";
-  const n = Number(scan);
-  return `account.html?id=${encodeURIComponent(volume)}${Number.isInteger(n) && n > 0 ? `&scan=${n}` : ""}`;
+export function volumeKind(collectionOrKind) {
+  return VOLUME_KINDS[collectionOrKind] || VOLUME_KINDS[KIND_OF_COLLECTION[collectionOrKind]] || VOLUME_KINDS.account;
 }
 
-/** A listing's link for a summary: the account reader for an account-book scan, the document reader for anything else. */
+/** Where a volume's scan is read: its reader, opened at that scan. */
+export function volumeHref(volume, scan, kind = "account") {
+  const { page, tab } = volumeKind(kind);
+  if (!VOLUME_ID.test(String(volume || ""))) return `collections.html#${tab}`;
+  const n = Number(scan);
+  return `${page}?id=${encodeURIComponent(volume)}${Number.isInteger(n) && n > 0 ? `&scan=${n}` : ""}`;
+}
+
+export function accountHref(volume, scan) {
+  return volumeHref(volume, scan, "account");
+}
+
+/** A listing's link for a summary: a volume's reader for an account-book or notebook scan, the document reader for anything else. */
 export function entryHref(s) {
-  return s.kind === "account" ? accountHref(s.volume, s.scan) : `document.html?id=${encodeURIComponent(s.id)}`;
+  return VOLUME_KINDS[s.kind] ? volumeHref(s.volume, s.scan, s.kind) : `document.html?id=${encodeURIComponent(s.id)}`;
 }
 
 export function volumeEntry(v, base) {
-  const href = accountHref(v.id);
+  const kind = volumeKind(v.collection);
+  const href = volumeHref(v.id, null, v.collection);
+  const about = v.subjects && v.subjects.length ? v.subjects.join(" · ") : (v.description || "");
   return `<article class="item">
     <a href="${href}" tabindex="-1" aria-hidden="true">${thumbHtml(v, base, { alt: "" })}</a>
     <div class="item-body"><a class="item-title" href="${href}">${esc(v.title)}</a>
-      ${v.subjects && v.subjects.length ? `<p class="item-desc">${esc(v.subjects.join(" · "))}</p>` : ""}
-      <ul class="facts">${v.date ? `<li>${icon("calendar")}${esc(v.date)}</li>` : ""}<li>${icon("book-open")}Account book ${esc(v.id)}</li>
+      ${about ? `<p class="item-desc">${esc(about)}</p>` : ""}
+      <ul class="facts">${v.date ? `<li>${icon("calendar")}${esc(v.date)}</li>` : ""}<li>${icon("book-open")}${esc(kind.name)} ${esc(v.id)}</li>
         <li>${icon("files")}${plural(v.count, "scan")}</li>
         <li>${icon("badge-check")}${v.approved ? `${v.approved.toLocaleString()} verified` : "None verified yet"}</li></ul></div></article>`;
 }
@@ -50,7 +67,7 @@ export function documentEntry(s, base, { title = null, description = null, match
     <div class="item-body"><a class="item-title" href="${href}">${title ?? esc(s.title)}</a>
       ${s.description || description ? `<p class="item-desc">${description ?? esc(s.description)}</p>` : ""}
       ${facts(s, { collection })}
-      <div class="item-foot">${badge(s.status)}${s.kind === "account"
+      <div class="item-foot">${badge(s.status)}${VOLUME_KINDS[s.kind]
         // The opening's own ID counts scans from zero, so a reader sees the book and its scan number instead.
         ? `<span>${esc(s.volume)}, scan ${esc(s.scan)}</span>` : `<span>${esc(s.id)}</span>${s.pages ? `<span>${plural(s.pages, "page")}</span>` : ""}`}
         ${matched ? `<span>Matched in ${esc(matched)}</span>` : ""}

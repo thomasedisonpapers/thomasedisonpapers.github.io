@@ -25,7 +25,8 @@ from passage import key_of, passages
 logger = logging.getLogger("build")
 
 SCHEMA = 1
-SUMMARIES_PER_FILE = 1000
+# A page of results is spread across the years, so small files keep it to a few hundred kilobytes with 90,000 entries.
+SUMMARIES_PER_FILE = 200
 THUMB_WIDTH = 240
 STATUSES = ["approved", "draft", "edition", "none"]
 # Fields our record fills first and edisondigital fills where ours is empty.
@@ -87,6 +88,11 @@ def load_local(dataset: Path) -> tuple[dict, dict]:
 
 
 ACCOUNT_TYPE = "Account book"
+NOTEBOOK_TYPE = "Notebook"
+# Each kind of bound volume, by the collection the publisher names it with: (record kind, document type).
+VOLUME_KINDS = {"accounts": ("account", ACCOUNT_TYPE), "notebooks": ("notebook", NOTEBOOK_TYPE)}
+SCAN_KINDS = frozenset(kind for kind, _ in VOLUME_KINDS.values())
+_IIIF = re.compile(r"^https://iiif\.archive\.org/[^\s\\]+$")
 # The marks the drafting prompt uses for a ledger's ticks and crossings, which are not words a reader searches for.
 _LEDGER_MARKS = re.compile(r"\[(?:tick|posting cross|cancelled|unclear)\]", re.IGNORECASE)
 _READING = re.compile(r"\[(?:unclear|struck out|insertion|margin):\s*([^\]]*)\]", re.IGNORECASE)
@@ -94,22 +100,25 @@ _READING = re.compile(r"\[(?:unclear|struck out|insertion|margin):\s*([^\]]*)\]"
 _FIGURE = re.compile(r"(?<![\w.])\d+(?:[.,/]\d+)*(?![\w])")
 
 
-def load_volumes(dataset: Path) -> dict[str, dict]:
-    """The published account books by ID, withdrawn ones left out, or nothing before the first publish."""
+def load_volumes(dataset: Path, *, collections: set[str] | None = None) -> dict[str, dict]:
+    """The published account books and notebooks by ID, withdrawn ones left out, or nothing before the first publish."""
     manifest_path = dataset / "volumes" / "manifest.json"
     if not manifest_path.exists():
         return {}
     manifest = read_json(manifest_path)
     withdrawn = set(manifest.get("withdrawn", []))
     volumes = {}
-    for volume_id in sorted(manifest.get("volumes", {})):
+    for volume_id, entry in sorted(manifest.get("volumes", {}).items()):
         if volume_id in withdrawn:
+            continue
+        if collections is not None and entry.get("collection") and entry["collection"] not in collections:
             continue
         safe_id(volume_id)
         volume = read_json(dataset / "volumes" / volume_id / "volume.json")
         if volume.get("id") != volume_id:
             raise BuildError(f"volumes/{volume_id}/volume.json says it is {volume.get('id')!r}")
-        volumes[volume_id] = volume
+        if collections is None or (volume.get("collection") or "accounts") in collections:
+            volumes[volume_id] = volume
     return volumes
 
 
@@ -117,13 +126,16 @@ def _plain_marks(text: str) -> str:
     return " ".join(_LEDGER_MARKS.sub(" ", _READING.sub(r"\1", text or "")).split())
 
 
-def opening_text(pages: list[dict]) -> str:
+def opening_text(pages: list[dict], *, keep_figures: bool = False) -> str:
     """An opening's words in reading order (lines, each table's caption and rows, drawings), as search and meaning read them."""
     def keep_year(match: re.Match) -> str:
         value = match[0]
         return value if len(value) == 4 and value.startswith(("18", "19")) and value.isdecimal() else " "
 
-    return "\n".join(line for line in (" ".join(_FIGURE.sub(keep_year, line).split()) for line in _opening_lines(pages)) if line)
+    lines = _opening_lines(pages)
+    if not keep_figures:
+        lines = [" ".join(_FIGURE.sub(keep_year, line).split()) for line in lines]
+    return "\n".join(line for line in lines if line)
 
 
 def _opening_lines(pages: list[dict]) -> list[str]:
@@ -148,29 +160,51 @@ def opening_description(pages: list[dict]) -> str:
     return ""
 
 
+_ARCHIVE_ITEM = re.compile(r"^https://iiif\.archive\.org/image/iiif/3/(taepnotebook-[A-Za-z0-9_-]+)%2F")
+
+
+def bookreader_page(iiif: str, n: int) -> str | None:
+    """archive.org's book-viewer image of scan `n`, less its size: page index n-1 is the manifest's canvas n-1, as our scans are."""
+    match = _ARCHIVE_ITEM.match(iiif or "")
+    return f"https://archive.org/download/{match.group(1)}/page/n{n - 1}" if match and isinstance(n, int) and n >= 1 else None
+
+
 def opening_records(volumes: dict[str, dict], has_file=lambda path: False) -> dict[str, dict]:
     """Each account-book opening as a record the search, topics and meaning index read like any document's."""
     records = {}
     for volume_id, volume in volumes.items():
         years = volume.get("years") or []
+        kind, kind_type = VOLUME_KINDS.get(volume.get("collection"), VOLUME_KINDS["accounts"])
         for opening in volume.get("openings") or []:
             n, opening_id = opening["n"], safe_id(opening["id"])
             if opening_id in records:
                 raise BuildError(f"duplicate account-book opening ID {opening_id}")
             pages = opening.get("pages") or []
             thumb, full = f"scans/{volume_id}/thumb/{n:04d}.jpg", f"scans/{volume_id}/full/{n:04d}.jpg"
+            iiif = opening.get("iiif") if _IIIF.fullmatch(str(opening.get("iiif") or "")) else None
+            if iiif:
+                # A notebook scan is linked from archive.org, never copied: its book viewer's page images, which answered
+                # in about a second on 23 November while the IIIF server timed out on many first requests.
+                page_base = bookreader_page(iiif, n)
+                scan_pages = [{"n": 1, "width": opening.get("width"), "height": opening.get("height"),
+                               "thumb": f"{page_base}_w400.jpg" if page_base else f"{iiif}/full/400,/0/default.jpg",
+                               "view": f"{page_base}_w1600.jpg" if page_base else f"{iiif}/full/1600,/0/default.jpg",
+                               "full": f"{iiif}/full/1600,/0/default.jpg"}]
+            else:
+                scan_pages = ([{"n": 1, "width": opening.get("width"), "height": opening.get("height"), "thumb": thumb, "view": full, "full": full}]
+                              if has_file(thumb) and has_file(full) else [])
             records[opening_id] = {
-                "id": opening_id, "kind": "account", "volume": volume_id, "scan": n,
-                "title": f"{volume.get('title') or volume_id}, scan {n}", "type": ACCOUNT_TYPE,
+                "id": opening_id, "kind": kind, "volume": volume_id, "scan": n,
+                "title": f"{volume.get('title') or volume_id}, scan {n}", "type": kind_type,
                 "date": volume.get("date", ""), "year": years[0] if years else None,
                 "status": opening.get("status", "draft"), "folder": {"id": volume_id, "title": volume.get("title") or volume_id},
                 "subjects": list(volume.get("subjects") or []),
                 "names": list(dict.fromkeys(p for page in pages for p in page.get("people") or [])),
                 "places": list(dict.fromkeys(p for page in pages for p in page.get("places") or [])),
-                "description": opening_description(pages), "transcription": opening_text(pages) or _plain_marks(opening.get("latex", "")),
-                # A scan is shown from the mirror only once it is there; until then the reader falls back to edisondigital.
-                "pages": ([{"n": 1, "width": opening.get("width"), "height": opening.get("height"), "thumb": thumb, "view": full, "full": full}]
-                          if has_file(thumb) and has_file(full) else []),
+                "description": opening_description(pages),
+                "transcription": opening_text(pages, keep_figures=kind == "notebook") or _plain_marks(opening.get("latex", "")),
+                # A mirrored scan is shown from the mirror only once it is there; until then the reader falls back to edisondigital.
+                "pages": scan_pages,
             }
     return records
 
@@ -178,7 +212,7 @@ def opening_records(volumes: dict[str, dict], has_file=lambda path: False) -> di
 def add_openings(records: dict, openings: dict) -> None:
     duplicates = records.keys() & openings.keys()
     if duplicates:
-        raise BuildError(f"account-book openings share IDs with documents: {', '.join(sorted(duplicates)[:10])}")
+        raise BuildError(f"account-book and notebook openings share IDs with documents: {', '.join(sorted(duplicates)[:10])}")
     records.update(openings)
 
 
@@ -194,12 +228,13 @@ def number_ranges(numbers: list[int]) -> str:
 
 
 def volume_entry(volume: dict, members: list[dict], summaries_of: dict[str, dict], has_file) -> dict:
-    """One account book as the collections page lists it: title, dates, subjects, counts and a cover from its first mirrored scan."""
+    """One account book or notebook as the collections page lists it: title, dates, subjects, counts and a cover from its first scan."""
     volume_id = volume["id"]
     cover = next((summaries_of[m["id"]] for m in members if summaries_of[m["id"]]["thumb"]), None)
     pdf = f"volumes/{volume_id}/{volume['pdf']}" if volume.get("pdf") else None
-    mirrored = [m["scan"] for m in members if m.get("pages")]
-    return {"mirrored": number_ranges(mirrored), "id": volume_id, "title": volume.get("title") or volume_id, "date": volume.get("date", ""), "years": volume.get("years") or [],
+    # Only scans copied to the data host count as mirrored; a notebook's scans are linked from archive.org instead.
+    mirrored = [m["scan"] for m in members if m.get("pages") and str(m["pages"][0].get("view", "")).startswith("scans/")]
+    return {"mirrored": number_ranges(mirrored), "id": volume_id, "collection": volume.get("collection") or "accounts", "title": volume.get("title") or volume_id, "date": volume.get("date", ""), "years": volume.get("years") or [],
             "subjects": volume.get("subjects") or [], "series": volume.get("series") or [], "description": volume.get("description", ""),
             "count": len(members), "approved": sum(1 for m in members if m.get("status") == "approved"),
             "status": volume.get("status", "draft"), "pdf": pdf if pdf and has_file(pdf) else None,
@@ -395,7 +430,7 @@ def summary(record: dict, thumb: str | None) -> dict:
             "thumb": thumb or first.get("thumb"), "thumb_from": "site" if thumb else ("web" if str(first.get("thumb", "")).startswith("http") else "dataset"),
             "ratio": round((first.get("height") or 4) / (first.get("width") or 3), 3), "pages": len(record.get("pages") or []),
             # An account-book opening opens in the account reader at its scan rather than as a document.
-            **({"kind": "account", "volume": record["volume"], "scan": record["scan"]} if record.get("kind") == "account" else {})}
+            **({"kind": record["kind"], "volume": record["volume"], "scan": record["scan"]} if record.get("kind") in SCAN_KINDS else {})}
 
 
 def shared_scans(records: dict) -> list[dict]:
@@ -673,8 +708,6 @@ def build(dataset: Path, web: Path, out: Path, *, allow_shrink: bool = False, da
     # A withdrawal removes the document whichever source it came from, the edisondigital mirror included.
     for document_id in manifest.get("withdrawn", []):
         records.pop(document_id, None)
-    if dataset_url and not records and not (allow_shrink and manifest.get("withdrawn")):
-        raise BuildError("the public dataset contains no documents")
     if conflicts:
         raise BuildError(f"DocIDs used by a new document and a different edisondigital item: {', '.join(conflicts[:10])}")
     def has_file(path: str) -> bool:
@@ -685,6 +718,8 @@ def build(dataset: Path, web: Path, out: Path, *, allow_shrink: bool = False, da
     volumes = load_volumes(dataset)
     openings = opening_records(volumes, has_file)
     add_openings(records, openings)
+    if dataset_url and not records and not (allow_shrink and manifest.get("withdrawn")):
+        raise BuildError("the public dataset contains no documents")
     for record in records.values():
         safe_id(record["id"])
         folder_id = (record.get("folder") or {}).get("id", "")
@@ -697,7 +732,7 @@ def build(dataset: Path, web: Path, out: Path, *, allow_shrink: bool = False, da
                     raise BuildError(f"{record['id']} page {page.get('n')} has no {size} file at {path}")
         if record.get("pdf") and not has_file(record["pdf"]):
             raise BuildError(f"{record['id']} has no PDF file at {record['pdf']}")
-        if record.get("kind") != "account":
+        if record.get("kind") not in SCAN_KINDS:
             record["description"] = description_for(record, remote.get(record["id"], {}))
     report_shared_scans(shared_scans(records))
 
@@ -728,7 +763,7 @@ def build(dataset: Path, web: Path, out: Path, *, allow_shrink: bool = False, da
     summaries, terms_by_doc = [], []
     for record in ordered:
         # Account-book scans keep their mirror's thumbnail on the data host, so thousands of them never fill the site's own space.
-        thumb = None if record.get("kind") == "account" else make_thumb(dataset, record, data_root)
+        thumb = None if record.get("kind") in SCAN_KINDS else make_thumb(dataset, record, data_root)
         summaries.append(summary(record, thumb))
         terms_by_doc.append(document_terms(record))
 
@@ -775,7 +810,7 @@ def build(dataset: Path, web: Path, out: Path, *, allow_shrink: bool = False, da
     by_volume: dict[str, list[dict]] = defaultdict(list)
     for record in ordered:
         folder_id = (record.get("folder") or {}).get("id", "")
-        if record.get("kind") == "account":
+        if record.get("kind") in SCAN_KINDS:
             # The reader fetches a whole account book from the data host, so only its listing is written here.
             by_volume[record["volume"]].append(record)
         elif folder_id:
@@ -800,10 +835,13 @@ def build(dataset: Path, web: Path, out: Path, *, allow_shrink: bool = False, da
     summaries_of = {s["id"]: s for s in summaries}
     volume_list = [volume_entry(volume, sorted(by_volume.get(volume_id, []), key=lambda r: r["scan"]), summaries_of, has_file)
                    for volume_id, volume in volumes.items()]
-    write_json(site_data / "volumes.json", volume_list)
+    # The reader needs only its own volume's entry, so each has a small file; the list keeps short descriptions.
+    for entry in volume_list:
+        write_json(site_data / "volumes" / f"{safe_id(entry['id'])}.json", entry)
+    write_json(site_data / "volumes.json", [{**v, "description": v["description"][:200]} for v in volume_list])
 
     ordinal_of = {s["id"]: n for n, s in enumerate(summaries)}
-    is_account = [r.get("kind") == "account" for r in ordered]
+    is_scan = [r.get("kind") in SCAN_KINDS for r in ordered]
     topic_list = []
     subjects = subject_index(ordered)
     topic_ids = set()
@@ -816,8 +854,8 @@ def build(dataset: Path, web: Path, out: Path, *, allow_shrink: bool = False, da
         topic_ids.add(topic_id)
         matched = topic_documents(topic, subjects, terms_by_doc, variants)
         if not topic.get("generated"):
-            # A featured topic promises letters and papers on its subject; a company's ledger scans would bury them.
-            matched = [n for n in matched if not is_account[n]]
+            # A featured topic promises letters and papers on its subject; thousands of ledger and notebook scans would bury them.
+            matched = [n for n in matched if not is_scan[n]]
         cover = topic.get("cover") if topic.get("cover") in ordinal_of else None
         if cover is None and matched:
             cover = next((summaries[n]["id"] for n in matched if summaries[n]["status"] == "approved" and summaries[n]["thumb"]),
@@ -834,8 +872,8 @@ def build(dataset: Path, web: Path, out: Path, *, allow_shrink: bool = False, da
     decades = Counter((s["year"] // 10) * 10 for s in summaries if s["year"])
     recent = sorted((r for r in records.values() if r.get("status") == "approved"), key=lambda r: r.get("updated") or "", reverse=True)
     # The landing page opens on a real verified scan, the most recently verified one with a page to show.
-    hero_record = (next((r for r in recent if r.get("pages") and r.get("kind") != "account"), None)
-                   or next((r for r in ordered if r.get("pages") and r.get("kind") != "account"), None))
+    hero_record = (next((r for r in recent if r.get("pages") and r.get("kind") not in SCAN_KINDS), None)
+                   or next((r for r in ordered if r.get("pages") and r.get("kind") not in SCAN_KINDS), None))
     hero = hero_record and {"id": hero_record["id"], "title": hero_record.get("title", ""), "view": hero_record["pages"][0]["view"]}
     built_at = datetime.now(timezone.utc).isoformat()
     catalog = {"schema": SCHEMA, "built_at": built_at, "documents": len(summaries), "approved": approved,
