@@ -1,6 +1,8 @@
 """The Porter stemmer (1980), so "laboratory", "laboratories" and "laboratory's" are one word; web/js/stemmer.js is its twin."""
 from __future__ import annotations
 
+from functools import lru_cache
+
 _VOWELS = set("aeiou")
 
 
@@ -63,6 +65,8 @@ _STEP3.sort(key=lambda rule: -len(rule[0]))
 _STEP4.sort(key=len, reverse=True)
 
 
+# A ledger repeats the same few hundred words thousands of times, and stemming each again took most of the build.
+@lru_cache(maxsize=200_000)
 def stem(word: str) -> str:
     """A word's stem; numbers, identifiers and words of two letters or fewer are left as they are."""
     if len(word) <= 2 or not word.isalpha() or not word.isascii():

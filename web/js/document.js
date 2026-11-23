@@ -3,9 +3,9 @@ import { STATUS, badge, catalog, crumbs, dataPath, dataUrl, datasetUrls, esc, fa
   sources, statusHelp, summaries, validId, wireHelp } from "./core.js";
 import { Index, fold } from "./search.js";
 import { renderTranscription } from "./transcript.js";
-import { relatedShelf } from "./cards.js";
+import { accountHref, relatedShelf } from "./cards.js";
+import { Viewer, mobileSwitch, scanPane, wireFocus, wireMobileSwitch, wireSplitter, wireTabs } from "./reader.js";
 
-const MAX_ZOOM = 8;
 const EDISONDIGITAL = "https://edisondigital.rutgers.edu/";
 const NOTICES = {
   draft: ["clock", "Under review by admin — transcription may not be accurate", "This text was drafted and is waiting for an editor to check it against the original."],
@@ -20,6 +20,7 @@ async function locate(id) {
   if (ordinal === undefined) return null;
   const [summary] = await summaries([ordinal]);
   if (!summary || summary.id !== id) return null;
+  if (summary.kind === "account") return { redirect: accountHref(summary.volume, summary.scan) };
   const { revision } = await catalog();
   return loadDocument(revision, id, summary.folder);
 }
@@ -85,6 +86,10 @@ async function render() {
   const page = document.getElementById("page");
   const id = validId(param("id"));
   const found = id && await locate(id);
+  if (found?.redirect) {
+    location.replace(found.redirect);
+    return;
+  }
   if (!found || !found.record) {
     page.innerHTML = `${crumbs([["Home", "index.html"], ["Not found", null]])}<div class="empty-state"><h1>Document not found</h1>
       <p>No document has the ID ${esc(param("id"))}. <a href="search.html?q=${encodeURIComponent(param("id"))}">Search for it</a></p></div>`;
@@ -111,25 +116,9 @@ async function render() {
     ${notice ? `<div class="notice ${record.status === "draft" ? "warn" : "info"}" role="note">${icon(notice[0])}<span><strong>${esc(notice[1])}</strong>${notice[2] ? ` ${esc(notice[2])}` : ""}</span></div>` : ""}
     <p class="notice info" id="newer" hidden>${icon("info")}<span>A newer version of this document is available. <a href="">Refresh</a></span></p>
   </div>
-  <div class="segmented mobile-switch" role="radiogroup" aria-label="Show">
-    <label><input type="radio" name="show" value="scan" checked><span>${icon("image")} Scan</span></label>
-    <label><input type="radio" name="show" value="text"><span>${icon("file-text")} Transcription</span></label></div>
+  ${mobileSwitch()}
   <div class="reader" data-show="scan">
-    <section class="scan-pane" aria-label="Original scan">
-      <div class="toolbar">
-        ${tool("prev", "chevron-left", "Previous page", "Previous")}<span class="page-label" aria-live="polite"></span>
-        ${tool("next", "chevron-right", "Next page", "Next")}<span class="spacer"></span>
-        ${tool("out", "zoom-out", "Zoom out", "Zoom out")}${tool("in", "zoom-in", "Zoom in", "Zoom in")}<span class="sep" aria-hidden="true"></span>
-        ${tool("fit", "maximize-2", "Fit the whole page", "Fit page")}${tool("width", "unfold-horizontal", "Fit the page width", "Fit width")}
-        ${tool("turn", "rotate-cw", "Rotate a quarter turn", "Rotate")}<span class="sep" aria-hidden="true"></span>
-        ${tool("focus", "maximize", "Focus: fill the window with the scan and text", "Focus")}
-      </div>
-      <div class="viewer" role="img" tabindex="0" aria-roledescription="scan viewer" aria-label="Scan. Plus and minus zoom, arrow keys move, R rotates.">
-        <img alt=""><div class="state" hidden></div></div>
-      ${pages.length > 1 ? `<nav class="strip" aria-label="Pages"></nav>` : ""}
-    </section>
-    <div class="splitter" role="separator" aria-orientation="vertical" tabindex="0" aria-valuemin="25" aria-valuemax="75"
-      aria-label="Resize the scan and the transcription; use the arrow keys, or double-click to reset" title="Drag to resize"></div>
+    ${scanPane({ unit: "page", strip: pages.length > 1 })}
     <section class="text-pane" aria-label="Transcription and details">
       <div class="tabs" role="tablist">
         <button role="tab" aria-selected="true" data-tab="text" title="Transcription">${icon("file-text")}<span class="lbl">Transcription</span></button>
@@ -163,71 +152,15 @@ async function render() {
   wireHelp();
   showRelated(record);
   await wireDownloads(record);
-  wireTabs();
-  const viewer = new Viewer(page.querySelector(".scan-pane"), pages, record);
+  wireTabs(page);
+  // The transcription marks where the page on screen begins, so the reader can find their place in the text.
+  const onShow = (index) => document.querySelectorAll(".tp-page-break").forEach((b) => b.classList.toggle("current", Number(b.dataset.page) === index + 1));
+  const viewer = new Viewer(page.querySelector(".scan-pane"), pages, { title: record.title, onShow });
   wireSplitter(page.querySelector(".reader"), page.querySelector(".splitter"));
   wireFocus(page.querySelector("[data-act=focus]"));
   page.querySelectorAll("[data-goto]").forEach((b) => b.addEventListener("click", () => viewer.show(Number(b.dataset.goto) - 1)));
-  page.querySelectorAll("input[name=show]").forEach((r) => r.addEventListener("change", () => { page.querySelector(".reader").dataset.show = r.value; }));
+  wireMobileSwitch(page);
   watchForNewer(record);
-}
-
-// A toolbar button keeps its name for screen readers and on hover even when a narrow pane hides its label.
-function tool(act, iconName, title, label) {
-  return `<button type="button" data-act="${act}" title="${esc(title)}" aria-label="${esc(title)}">${icon(iconName)}<span class="lbl">${esc(label)}</span></button>`;
-}
-
-const SPLIT_KEY = "archive-split";
-const SPLIT_DEFAULT = 55;
-
-// The divider between scan and text: dragged, moved with the arrow keys, reset with a double-click, and remembered.
-function wireSplitter(reader, splitter) {
-  const set = (percent) => {
-    const value = Math.max(25, Math.min(75, Math.round(percent * 10) / 10));
-    reader.style.setProperty("--split", `${value}%`);
-    splitter.setAttribute("aria-valuenow", String(Math.round(value)));
-    try { localStorage.setItem(SPLIT_KEY, String(value)); } catch { /* the split still works, it just is not remembered */ }
-  };
-  let saved = SPLIT_DEFAULT;
-  try { saved = Number(localStorage.getItem(SPLIT_KEY)) || SPLIT_DEFAULT; } catch { /* storage can be blocked */ }
-  set(saved);
-  splitter.addEventListener("pointerdown", (event) => {
-    splitter.setPointerCapture(event.pointerId);
-    splitter.classList.add("dragging");
-    document.body.classList.add("resizing");
-  });
-  splitter.addEventListener("pointermove", (event) => {
-    if (!splitter.hasPointerCapture(event.pointerId)) return;
-    const box = reader.getBoundingClientRect();
-    set(((event.clientX - box.left) / box.width) * 100);
-  });
-  const stop = (event) => {
-    if (splitter.hasPointerCapture(event.pointerId)) splitter.releasePointerCapture(event.pointerId);
-    splitter.classList.remove("dragging");
-    document.body.classList.remove("resizing");
-  };
-  splitter.addEventListener("pointerup", stop);
-  splitter.addEventListener("pointercancel", stop);
-  splitter.addEventListener("dblclick", () => set(SPLIT_DEFAULT));
-  splitter.addEventListener("keydown", (event) => {
-    const now = Number(splitter.getAttribute("aria-valuenow")) || SPLIT_DEFAULT;
-    const moves = { ArrowLeft: now - 3, ArrowRight: now + 3, Home: SPLIT_DEFAULT };
-    if (event.key in moves) { event.preventDefault(); set(moves[event.key]); }
-  });
-}
-
-// Focus fills the window with the scan and the text; Escape or the same button brings the page back.
-function wireFocus(button) {
-  const sync = () => {
-    const on = document.body.classList.contains("focus-mode");
-    button.innerHTML = `${icon(on ? "minimize" : "maximize")}<span class="lbl">${on ? "Exit focus" : "Focus"}</span>`;
-    button.setAttribute("aria-pressed", String(on));
-  };
-  button.addEventListener("click", () => { document.body.classList.toggle("focus-mode"); sync(); });
-  document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape" && document.body.classList.contains("focus-mode")) { document.body.classList.remove("focus-mode"); sync(); }
-  });
-  sync();
 }
 
 async function wireDownloads(record) {
@@ -252,15 +185,6 @@ async function wireDownloads(record) {
   });
 }
 
-function wireTabs() {
-  const page = document.getElementById("page");
-  const tabs = [...page.querySelectorAll(".tabs [role=tab]")];
-  tabs.forEach((tab) => tab.addEventListener("click", () => {
-    tabs.forEach((t) => t.setAttribute("aria-selected", String(t === tab)));
-    page.querySelectorAll("[data-panel]").forEach((p) => { p.hidden = p.dataset.panel !== tab.dataset.tab; });
-  }));
-}
-
 // Checks for a newer build every five minutes and offers a refresh when this document changed.
 function watchForNewer(record) {
   setInterval(async () => {
@@ -272,202 +196,6 @@ function watchForNewer(record) {
       if (!fresh || fresh.hash !== record.hash) document.getElementById("newer").hidden = false;
     } catch { /* checking again in five minutes is enough */ }
   }, 300000);
-}
-
-class Viewer {
-  constructor(pane, pages, record) {
-    this.pane = pane;
-    this.pages = pages;
-    this.record = record;
-    this.el = pane.querySelector(".viewer");
-    this.img = this.el.querySelector("img");
-    this.stateEl = this.el.querySelector(".state");
-    this.index = 0;
-    this.turn = 0;
-    this.request = 0;
-    this.pointers = new Map();
-    const act = (name, fn) => pane.querySelector(`[data-act=${name}]`).addEventListener("click", fn);
-    act("prev", () => this.show(this.index - 1));
-    act("next", () => this.show(this.index + 1));
-    act("in", () => this.zoomCenter(1.25));
-    act("out", () => this.zoomCenter(0.8));
-    act("fit", () => { this.mode = "page"; this.fit(); });
-    act("width", () => { this.mode = "width"; this.fit(); });
-    act("turn", () => { this.turn = (this.turn + 90) % 360; this.fit(); });
-    // Positions come from the viewer's own box, not the transformed image under the pointer.
-    const point = (e) => { const r = this.el.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; };
-    this.el.addEventListener("wheel", (e) => { e.preventDefault(); this.zoomAt(...point(e), e.deltaY < 0 ? 1.15 : 1 / 1.15); }, { passive: false });
-    this.el.addEventListener("dblclick", (e) => this.zoomAt(...point(e), 2));
-    this.el.addEventListener("pointerdown", (e) => this.down(e));
-    this.el.addEventListener("pointermove", (e) => this.move(e));
-    ["pointerup", "pointercancel", "pointerleave"].forEach((t) => this.el.addEventListener(t, (e) => this.up(e)));
-    this.el.addEventListener("keydown", (e) => this.key(e));
-    this.mode = "page";
-    // A chosen fit holds as the window or the divider changes size; a reader's own zoom is left alone.
-    new ResizeObserver(() => { if (this.img.naturalWidth && this.mode !== "free") this.fit(); }).observe(this.el);
-    this.buildStrip();
-    this.show(0);
-  }
-
-  async buildStrip() {
-    const strip = this.pane.querySelector(".strip");
-    if (!strip) return;
-    for (const page of this.pages) {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.setAttribute("aria-label", `Page ${page.n}`);
-      const img = document.createElement("img");
-      img.alt = "";
-      img.loading = "lazy";
-      img.src = (await datasetUrls(page.thumb))[0];
-      button.appendChild(img);
-      button.addEventListener("click", () => this.show(page.n - 1));
-      strip.appendChild(button);
-    }
-    this.markStrip();
-  }
-
-  markStrip() {
-    this.pane.querySelectorAll(".strip button").forEach((b, n) => b.setAttribute("aria-current", String(n === this.index)));
-  }
-
-  // Each page tries its screen-size image on every source, then the full scan, before showing a Retry button.
-  async show(n) {
-    if (!this.pages.length) {
-      this.message("No scan is available for this document.");
-      return;
-    }
-    this.index = Math.max(0, Math.min(this.pages.length - 1, n));
-    this.turn = 0;
-    if (this.mode === "free") this.mode = "page";
-    const page = this.pages[this.index];
-    this.pane.querySelector(".page-label").textContent = `Page ${this.index + 1} of ${this.pages.length}`;
-    this.pane.querySelector("[data-act=prev]").disabled = this.index === 0;
-    this.pane.querySelector("[data-act=next]").disabled = this.index === this.pages.length - 1;
-    this.markStrip();
-    document.querySelectorAll(".tp-page-break").forEach((b) => b.classList.toggle("current", Number(b.dataset.page) === this.index + 1));
-    const mine = ++this.request;
-    const candidates = [...await datasetUrls(page.view), ...await datasetUrls(page.full)];
-    this.message("Loading the scan…");
-    this.img.style.visibility = "hidden";
-    for (const url of candidates) {
-      if (mine !== this.request) return;
-      const ok = await new Promise((resolve) => {
-        const timer = setTimeout(() => resolve(false), 15000);
-        this.img.onload = () => { clearTimeout(timer); resolve(true); };
-        this.img.onerror = () => { clearTimeout(timer); resolve(false); };
-        this.img.src = url;
-      });
-      if (mine !== this.request) return;
-      if (ok) {
-        this.img.alt = `Page ${this.index + 1} of ${this.pages.length}: ${this.record.title}`;
-        this.el.setAttribute("aria-label", `${this.img.alt}. Plus and minus zoom, arrow keys move, R rotates.`);
-        this.stateEl.hidden = true;
-        this.img.style.visibility = "visible";
-        this.fit();
-        return;
-      }
-    }
-    this.message("This scan could not be loaded just now.", true);
-  }
-
-  message(text, retry = false) {
-    this.stateEl.hidden = false;
-    this.stateEl.innerHTML = `<div>${esc(text)}${retry ? `<br><button type="button" class="btn">${icon("rotate-cw")}Try again</button>` : ""}</div>`;
-    if (retry) this.stateEl.querySelector("button").addEventListener("click", () => this.show(this.index));
-  }
-
-  dims() {
-    const w = this.img.naturalWidth || 1;
-    const h = this.img.naturalHeight || 1;
-    return this.turn % 180 ? [h, w, w, h] : [w, h, w, h];
-  }
-
-  fit() {
-    if (this.mode === "free") this.mode = "page";
-    const [bw, bh, w, h] = this.dims();
-    const vw = this.el.clientWidth;
-    const vh = this.el.clientHeight;
-    // The smallest zoom is always the whole page; "width" fills the pane's width and starts at the top of the page.
-    this.fitScale = Math.min(vw / bw, vh / bh) * 0.96;
-    this.scale = this.mode === "width" ? (vw / bw) * 0.96 : this.fitScale;
-    this.tx = vw / 2 - (this.scale * w) / 2;
-    this.ty = this.mode === "width" ? (this.scale * bh) / 2 - (this.scale * h) / 2 + vw * 0.02 : vh / 2 - (this.scale * h) / 2;
-    this.apply();
-  }
-
-  apply() {
-    const [, , w, h] = this.dims();
-    // Turned about the page's centre, so fitting and zooming use the same centre whatever the turn.
-    this.img.style.transform = `translate(${this.tx}px, ${this.ty}px) scale(${this.scale}) translate(${w / 2}px, ${h / 2}px) rotate(${this.turn}deg) translate(${-w / 2}px, ${-h / 2}px)`;
-  }
-
-  zoomAt(x, y, factor) {
-    if (!this.fitScale) return;
-    this.mode = "free";
-    const next = Math.max(this.fitScale, Math.min(this.fitScale * MAX_ZOOM, this.scale * factor));
-    const ratio = next / this.scale;
-    this.tx = x - (x - this.tx) * ratio;
-    this.ty = y - (y - this.ty) * ratio;
-    this.scale = next;
-    if (Math.abs(next - this.fitScale) < 1e-6) { this.fit(); return; }
-    this.apply();
-  }
-
-  zoomCenter(factor) {
-    this.zoomAt(this.el.clientWidth / 2, this.el.clientHeight / 2, factor);
-  }
-
-  down(e) {
-    // A button inside the viewer (Try again) keeps its own click instead of starting a drag.
-    if (e.target.closest("button")) return;
-    this.el.setPointerCapture(e.pointerId);
-    this.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
-    this.el.classList.add("dragging");
-  }
-
-  move(e) {
-    if (!this.pointers.has(e.pointerId)) return;
-    this.mode = "free";
-    const before = this.pointers.get(e.pointerId);
-    if (this.pointers.size === 2) {
-      // Two fingers: the change in their distance is the zoom, about their midpoint.
-      const other = [...this.pointers.entries()].find(([id]) => id !== e.pointerId)[1];
-      const rect = this.el.getBoundingClientRect();
-      const was = Math.hypot(before.x - other.x, before.y - other.y);
-      const now = Math.hypot(e.clientX - other.x, e.clientY - other.y);
-      if (was > 0) this.zoomAt((e.clientX + other.x) / 2 - rect.left, (e.clientY + other.y) / 2 - rect.top, now / was);
-    } else {
-      this.tx += e.clientX - before.x;
-      this.ty += e.clientY - before.y;
-      this.apply();
-    }
-    this.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
-  }
-
-  pan(dx, dy) {
-    this.mode = "free";
-    this.tx += dx;
-    this.ty += dy;
-    this.apply();
-  }
-
-  up(e) {
-    this.pointers.delete(e.pointerId);
-    if (!this.pointers.size) this.el.classList.remove("dragging");
-  }
-
-  key(e) {
-    const step = 60;
-    const actions = {
-      "+": () => this.zoomCenter(1.25), "=": () => this.zoomCenter(1.25), "-": () => this.zoomCenter(0.8), "0": () => this.fit(),
-      ArrowLeft: () => this.pan(step, 0), ArrowRight: () => this.pan(-step, 0), ArrowUp: () => this.pan(0, step), ArrowDown: () => this.pan(0, -step),
-      w: () => { this.mode = "width"; this.fit(); }, W: () => { this.mode = "width"; this.fit(); },
-      r: () => { this.turn = (this.turn + 90) % 360; this.fit(); }, R: () => { this.turn = (this.turn + 90) % 360; this.fit(); },
-      PageDown: () => this.show(this.index + 1), PageUp: () => this.show(this.index - 1),
-    };
-    if (actions[e.key]) { e.preventDefault(); actions[e.key](); }
-  }
 }
 
 render().catch((error) => {

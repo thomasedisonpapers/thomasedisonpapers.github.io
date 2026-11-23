@@ -86,6 +86,126 @@ def load_local(dataset: Path) -> tuple[dict, dict]:
     return records, manifest
 
 
+ACCOUNT_TYPE = "Account book"
+# The marks the drafting prompt uses for a ledger's ticks and crossings, which are not words a reader searches for.
+_LEDGER_MARKS = re.compile(r"\[(?:tick|posting cross|cancelled|unclear)\]", re.IGNORECASE)
+_READING = re.compile(r"\[(?:unclear|struck out|insertion|margin):\s*([^\]]*)\]", re.IGNORECASE)
+# Amounts and folio numbers fill a ledger but are never searched for, and indexing them tripled the index; years are kept.
+_FIGURE = re.compile(r"(?<![\w.])\d+(?:[.,/]\d+)*(?![\w])")
+
+
+def load_volumes(dataset: Path) -> dict[str, dict]:
+    """The published account books by ID, withdrawn ones left out, or nothing before the first publish."""
+    manifest_path = dataset / "volumes" / "manifest.json"
+    if not manifest_path.exists():
+        return {}
+    manifest = read_json(manifest_path)
+    withdrawn = set(manifest.get("withdrawn", []))
+    volumes = {}
+    for volume_id in sorted(manifest.get("volumes", {})):
+        if volume_id in withdrawn:
+            continue
+        safe_id(volume_id)
+        volume = read_json(dataset / "volumes" / volume_id / "volume.json")
+        if volume.get("id") != volume_id:
+            raise BuildError(f"volumes/{volume_id}/volume.json says it is {volume.get('id')!r}")
+        volumes[volume_id] = volume
+    return volumes
+
+
+def _plain_marks(text: str) -> str:
+    return " ".join(_LEDGER_MARKS.sub(" ", _READING.sub(r"\1", text or "")).split())
+
+
+def opening_text(pages: list[dict]) -> str:
+    """An opening's words in reading order (lines, each table's caption and rows, drawings), as search and meaning read them."""
+    def keep_year(match: re.Match) -> str:
+        value = match[0]
+        return value if len(value) == 4 and value.startswith(("18", "19")) and value.isdecimal() else " "
+
+    return "\n".join(line for line in (" ".join(_FIGURE.sub(keep_year, line).split()) for line in _opening_lines(pages)) if line)
+
+
+def _opening_lines(pages: list[dict]) -> list[str]:
+    out = []
+    for page in pages or []:
+        out += [_plain_marks(line) for line in page.get("lines") or []]
+        for table in page.get("tables") or []:
+            out.append(_plain_marks(table.get("caption", "")))
+            out += [_plain_marks(" ".join(cell for cell in row if cell)) for row in table.get("rows") or []]
+        for drawing in page.get("drawings") or []:
+            out.append(_plain_marks(" ".join([drawing.get("summary", ""), *drawing.get("labels", [])])))
+    return out
+
+
+def opening_description(pages: list[dict]) -> str:
+    """What an opening shows at a glance: the first account heading, else its first line of words."""
+    captions = [_plain_marks(t.get("caption", "")) for p in pages or [] for t in p.get("tables") or []]
+    lines = [_plain_marks(line) for p in pages or [] for line in p.get("lines") or []]
+    for text in [*captions, *lines]:
+        if len(re.findall(r"[A-Za-z]{2,}", text)) >= 2:
+            return text if len(text) <= 160 else text[:157].rstrip() + "…"
+    return ""
+
+
+def opening_records(volumes: dict[str, dict], has_file=lambda path: False) -> dict[str, dict]:
+    """Each account-book opening as a record the search, topics and meaning index read like any document's."""
+    records = {}
+    for volume_id, volume in volumes.items():
+        years = volume.get("years") or []
+        for opening in volume.get("openings") or []:
+            n, opening_id = opening["n"], safe_id(opening["id"])
+            if opening_id in records:
+                raise BuildError(f"duplicate account-book opening ID {opening_id}")
+            pages = opening.get("pages") or []
+            thumb, full = f"scans/{volume_id}/thumb/{n:04d}.jpg", f"scans/{volume_id}/full/{n:04d}.jpg"
+            records[opening_id] = {
+                "id": opening_id, "kind": "account", "volume": volume_id, "scan": n,
+                "title": f"{volume.get('title') or volume_id}, scan {n}", "type": ACCOUNT_TYPE,
+                "date": volume.get("date", ""), "year": years[0] if years else None,
+                "status": opening.get("status", "draft"), "folder": {"id": volume_id, "title": volume.get("title") or volume_id},
+                "subjects": list(volume.get("subjects") or []),
+                "names": list(dict.fromkeys(p for page in pages for p in page.get("people") or [])),
+                "places": list(dict.fromkeys(p for page in pages for p in page.get("places") or [])),
+                "description": opening_description(pages), "transcription": opening_text(pages) or _plain_marks(opening.get("latex", "")),
+                # A scan is shown from the mirror only once it is there; until then the reader falls back to edisondigital.
+                "pages": ([{"n": 1, "width": opening.get("width"), "height": opening.get("height"), "thumb": thumb, "view": full, "full": full}]
+                          if has_file(thumb) and has_file(full) else []),
+            }
+    return records
+
+
+def add_openings(records: dict, openings: dict) -> None:
+    duplicates = records.keys() & openings.keys()
+    if duplicates:
+        raise BuildError(f"account-book openings share IDs with documents: {', '.join(sorted(duplicates)[:10])}")
+    records.update(openings)
+
+
+def number_ranges(numbers: list[int]) -> str:
+    """Scan numbers as "1-10,15", so the reader asks the mirror only for scans it has, in a few bytes per book."""
+    out, numbers = [], sorted(set(numbers))
+    for n in numbers:
+        if out and out[-1][1] == n - 1:
+            out[-1][1] = n
+        else:
+            out.append([n, n])
+    return ",".join(f"{a}-{b}" if a != b else str(a) for a, b in out)
+
+
+def volume_entry(volume: dict, members: list[dict], summaries_of: dict[str, dict], has_file) -> dict:
+    """One account book as the collections page lists it: title, dates, subjects, counts and a cover from its first mirrored scan."""
+    volume_id = volume["id"]
+    cover = next((summaries_of[m["id"]] for m in members if summaries_of[m["id"]]["thumb"]), None)
+    pdf = f"volumes/{volume_id}/{volume['pdf']}" if volume.get("pdf") else None
+    mirrored = [m["scan"] for m in members if m.get("pages")]
+    return {"mirrored": number_ranges(mirrored), "id": volume_id, "title": volume.get("title") or volume_id, "date": volume.get("date", ""), "years": volume.get("years") or [],
+            "subjects": volume.get("subjects") or [], "series": volume.get("series") or [], "description": volume.get("description", ""),
+            "count": len(members), "approved": sum(1 for m in members if m.get("status") == "approved"),
+            "status": volume.get("status", "draft"), "pdf": pdf if pdf and has_file(pdf) else None,
+            "thumb": cover and cover["thumb"], "thumb_from": cover and cover["thumb_from"], "ratio": cover and cover["ratio"]}
+
+
 # Related documents come from the strongest model whose results are present, so a better model takes over once run.
 RELATED_MODELS = ("qwen3-embedding-0.6b", "arctic-embed-s")
 RELATED_COUNT = 6
@@ -273,7 +393,9 @@ def summary(record: dict, thumb: str | None) -> dict:
             "recipient": record.get("recipient", ""), "folder": folder.get("id", ""), "folder_title": folder.get("title", ""),
             "status": record.get("status") if record.get("status") in STATUSES else "none", "description": record.get("description", ""),
             "thumb": thumb or first.get("thumb"), "thumb_from": "site" if thumb else ("web" if str(first.get("thumb", "")).startswith("http") else "dataset"),
-            "ratio": round((first.get("height") or 4) / (first.get("width") or 3), 3), "pages": len(record.get("pages") or [])}
+            "ratio": round((first.get("height") or 4) / (first.get("width") or 3), 3), "pages": len(record.get("pages") or []),
+            # An account-book opening opens in the account reader at its scan rather than as a document.
+            **({"kind": "account", "volume": record["volume"], "scan": record["scan"]} if record.get("kind") == "account" else {})}
 
 
 def shared_scans(records: dict) -> list[dict]:
@@ -560,6 +682,9 @@ def build(dataset: Path, web: Path, out: Path, *, allow_shrink: bool = False, da
             return True
         return path in available if available is not None else (dataset / path).is_file()
 
+    volumes = load_volumes(dataset)
+    openings = opening_records(volumes, has_file)
+    add_openings(records, openings)
     for record in records.values():
         safe_id(record["id"])
         folder_id = (record.get("folder") or {}).get("id", "")
@@ -572,7 +697,8 @@ def build(dataset: Path, web: Path, out: Path, *, allow_shrink: bool = False, da
                     raise BuildError(f"{record['id']} page {page.get('n')} has no {size} file at {path}")
         if record.get("pdf") and not has_file(record["pdf"]):
             raise BuildError(f"{record['id']} has no PDF file at {record['pdf']}")
-        record["description"] = description_for(record, remote.get(record["id"], {}))
+        if record.get("kind") != "account":
+            record["description"] = description_for(record, remote.get(record["id"], {}))
     report_shared_scans(shared_scans(records))
 
     previous_pointer = out / "data" / "current.json"
@@ -601,7 +727,9 @@ def build(dataset: Path, web: Path, out: Path, *, allow_shrink: bool = False, da
     ordered = sorted(records.values(), key=lambda r: (r.get("year") or 9999, r.get("date") or "", r["id"]))
     summaries, terms_by_doc = [], []
     for record in ordered:
-        summaries.append(summary(record, make_thumb(dataset, record, data_root)))
+        # Account-book scans keep their mirror's thumbnail on the data host, so thousands of them never fill the site's own space.
+        thumb = None if record.get("kind") == "account" else make_thumb(dataset, record, data_root)
+        summaries.append(summary(record, thumb))
         terms_by_doc.append(document_terms(record))
 
     for start in range(0, len(summaries), SUMMARIES_PER_FILE):
@@ -644,9 +772,13 @@ def build(dataset: Path, web: Path, out: Path, *, allow_shrink: bool = False, da
         return {**record, "related": ordinals} if ordinals else record
 
     by_folder: dict[str, list[dict]] = defaultdict(list)
+    by_volume: dict[str, list[dict]] = defaultdict(list)
     for record in ordered:
         folder_id = (record.get("folder") or {}).get("id", "")
-        if folder_id:
+        if record.get("kind") == "account":
+            # The reader fetches a whole account book from the data host, so only its listing is written here.
+            by_volume[record["volume"]].append(record)
+        elif folder_id:
             by_folder[folder_id].append(record)
         else:
             write_json(site_data / "unfiled" / f"{record['id']}.json", with_related(record))
@@ -665,8 +797,13 @@ def build(dataset: Path, web: Path, out: Path, *, allow_shrink: bool = False, da
                             "approved": sum(1 for r in members if r.get("status") == "approved"),
                             "thumb": first and first["thumb"], "thumb_from": first and first["thumb_from"],
                             "ratio": first and first["ratio"]})
+    summaries_of = {s["id"]: s for s in summaries}
+    volume_list = [volume_entry(volume, sorted(by_volume.get(volume_id, []), key=lambda r: r["scan"]), summaries_of, has_file)
+                   for volume_id, volume in volumes.items()]
+    write_json(site_data / "volumes.json", volume_list)
 
     ordinal_of = {s["id"]: n for n, s in enumerate(summaries)}
+    is_account = [r.get("kind") == "account" for r in ordered]
     topic_list = []
     subjects = subject_index(ordered)
     topic_ids = set()
@@ -678,6 +815,9 @@ def build(dataset: Path, web: Path, out: Path, *, allow_shrink: bool = False, da
             raise BuildError(f"duplicate topic id {topic_id!r}")
         topic_ids.add(topic_id)
         matched = topic_documents(topic, subjects, terms_by_doc, variants)
+        if not topic.get("generated"):
+            # A featured topic promises letters and papers on its subject; a company's ledger scans would bury them.
+            matched = [n for n in matched if not is_account[n]]
         cover = topic.get("cover") if topic.get("cover") in ordinal_of else None
         if cover is None and matched:
             cover = next((summaries[n]["id"] for n in matched if summaries[n]["status"] == "approved" and summaries[n]["thumb"]),
@@ -694,12 +834,14 @@ def build(dataset: Path, web: Path, out: Path, *, allow_shrink: bool = False, da
     decades = Counter((s["year"] // 10) * 10 for s in summaries if s["year"])
     recent = sorted((r for r in records.values() if r.get("status") == "approved"), key=lambda r: r.get("updated") or "", reverse=True)
     # The landing page opens on a real verified scan, the most recently verified one with a page to show.
-    hero_record = next((r for r in recent if r.get("pages")), None) or next((r for r in ordered if r.get("pages")), None)
+    hero_record = (next((r for r in recent if r.get("pages") and r.get("kind") != "account"), None)
+                   or next((r for r in ordered if r.get("pages") and r.get("kind") != "account"), None))
     hero = hero_record and {"id": hero_record["id"], "title": hero_record.get("title", ""), "view": hero_record["pages"][0]["view"]}
     built_at = datetime.now(timezone.utc).isoformat()
     catalog = {"schema": SCHEMA, "built_at": built_at, "documents": len(summaries), "approved": approved,
                "drafts": sum(1 for s in summaries if s["status"] == "draft"),
                "folders": folder_list, "topics": [t for t in topic_list if t["featured"]], "topic_count": len(topic_list),
+               "volumes": [{"id": v["id"], "title": v["title"]} for v in volume_list], "openings": len(openings),
                "decades": dict(sorted(decades.items())),
                "recent": [ordinal_of[r["id"]] for r in recent[:12]], "hero": hero,
                "sources": {"local": len(local), "edisondigital": len(remote)},
@@ -728,7 +870,8 @@ def build(dataset: Path, web: Path, out: Path, *, allow_shrink: bool = False, da
 
 
 # What the build reads; scans, viewer images and PDFs stay on Hugging Face and are checked against the file listing instead.
-RECORD_PATTERNS = ["local/manifest.json", "local/*/record.json", "edisondigital/current.json", "edisondigital/*/records.jsonl",
+RECORD_PATTERNS = ["local/manifest.json", "local/*/record.json", "volumes/manifest.json", "volumes/*/volume.json",
+                   "edisondigital/current.json", "edisondigital/*/records.jsonl",
                    "embeddings/*/related.json", "embeddings/arctic-embed-s/manifest.json", "embeddings/arctic-embed-s/documents.jsonl",
                    "embeddings/arctic-embed-s/parts/*"]
 

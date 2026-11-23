@@ -312,3 +312,37 @@ def test_query_evaluation_uses_the_selected_onnx_backend(tmp_path, monkeypatch):
     monkeypatch.setattr(embed, "load_onnx_encoder", lambda *args, **kwargs: _fake_encoder([]))
     assert embed.main(["queries", "--store", str(tmp_path), "--model", MODEL, "--backend", "onnx",
                        "--queries", str(lines)]) == 0
+
+
+def _with_account_book(dataset):
+    """Adds one published account book of one drafted scan to the test dataset."""
+    page = {"position": "single", "content": "table", "lines": ["Gold & Stock"], "people": ["Gault, Jacob"], "places": [], "drawings": [],
+            "tables": [{"caption": "In account with James Hammit", "columns": [], "rows": [["By Cash", "100.00"]]}]}
+    volume = {"id": "A234A", "title": "Account, Edison and Murray, 1873", "date": "1873", "years": [1873, 1873],
+              "subjects": ["Edison & Murray"], "openings": [{"n": 1, "id": "A234A-0000", "status": "draft", "source": "", "pages": [page]}]}
+    (dataset / "volumes" / "A234A").mkdir(parents=True)
+    (dataset / "volumes" / "A234A" / "volume.json").write_text(json.dumps(volume), "utf-8")
+    (dataset / "volumes" / "manifest.json").write_text(json.dumps({"volumes": {"A234A": {}}, "withdrawn": []}), "utf-8")
+    return dataset
+
+
+def test_a_drafted_account_book_scan_is_embedded_with_the_transcribed_documents(tmp_path):
+    dataset = _with_account_book(_dataset(tmp_path, [_record("E2002AAA")]))
+    assert "A234A-0000" in embed.wanted(dataset, "transcribed")
+
+
+def test_an_account_book_scans_passage_carries_its_books_subjects(tmp_path):
+    dataset = _with_account_book(_dataset(tmp_path, [_record("E2002AAA")]))
+    assert "Subjects: Edison & Murray." in embed.wanted(dataset, "transcribed")["A234A-0000"][0][1]
+
+
+def test_embedding_planning_refuses_an_opening_that_reuses_a_document_id(tmp_path):
+    dataset = _with_account_book(_dataset(tmp_path, [_record("A234A-0000")]))
+    with pytest.raises(embed.build.BuildError, match="openings share IDs with documents"):
+        embed.wanted(dataset, "transcribed")
+
+
+def test_related_documents_are_returned_in_similarity_order_across_blocks(monkeypatch, tmp_path):
+    vectors = np.array([[1, 0], [0, 1], [0.8, 0.6], [0.6, 0.8]], dtype=np.float32)
+    monkeypatch.setattr(embed, "document_vectors", lambda _: (["A", "B", "C", "D"], vectors))
+    assert embed.related(tmp_path, k=2, block=1)["D"] == [["C", 0.96], ["B", 0.8]]

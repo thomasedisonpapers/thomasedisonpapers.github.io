@@ -52,7 +52,8 @@ export async function mountResults(root, { within = null, placeholder = "Search 
   setStopwords(meta.stopwords);
   setVariants(meta.synonyms);
   const index = new Index(await dataUrl("index/"), meta.shards, (url) => fetchJSON(url));
-  const folderTitles = Object.fromEntries(data.folders.map((f) => [f.id, f.title]));
+  // Account books are collections too, named in the filters by their titles rather than their IDs.
+  const folderTitles = Object.fromEntries([...data.folders, ...(data.volumes || [])].map((f) => [f.id, f.title]));
   let state = readState();
   let request = 0;
 

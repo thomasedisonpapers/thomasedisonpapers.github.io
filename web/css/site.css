@@ -424,6 +424,39 @@ body.focus-mode .reader { height: 100dvh; border: 0; border-radius: 0; box-shado
 .about-table dt, .about-table dd { padding: 10px 0; border-bottom: 1px solid var(--hairline); margin: 0; }
 .about-table dt { color: var(--muted); font-weight: 500; padding-right: 12px; }
 .about-table dd { overflow-wrap: anywhere; color: var(--text); }
+/* Account books: a scan's ledger pages, set in the reading face with figures that line up down their columns. */
+.ledger { font: 400 clamp(0.98rem, 0.84rem + 0.4cqi, 1.15rem)/1.6 var(--reading); color: var(--text); max-width: 92ch; }
+.ledger .notice { font-family: var(--ui); margin-bottom: 18px; }
+.lg-page + .lg-page { margin-top: 28px; padding-top: 20px; border-top: 1px solid var(--hairline); }
+.lg-page-head { font: 600 0.72rem var(--ui); color: var(--muted); letter-spacing: 0.08em; text-transform: uppercase; margin: 0 0 10px; }
+.lg-lines { margin-bottom: 14px; }
+.lg-line { white-space: pre-wrap; overflow-wrap: anywhere; }
+.lg-table-wrap { overflow-x: auto; margin: 6px 0 18px; border: 1px solid var(--hairline); border-radius: var(--radius-sm); }
+.lg-table-wrap:focus-visible { outline: 2px solid var(--focus); }
+.lg-table { border-collapse: collapse; width: 100%; font-size: 0.94em; }
+.lg-table caption { caption-side: top; text-align: left; padding: 10px 12px 6px; font-weight: 600; }
+.lg-table th { font: 600 0.74rem var(--ui); color: var(--muted); text-align: left; letter-spacing: 0.04em; padding: 8px 12px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+.lg-table td { padding: 5px 12px; border-bottom: 1px solid var(--hairline); vertical-align: top; }
+.lg-table tr:last-child td { border-bottom: 0; }
+.lg-table .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.lg-caption { font-weight: 600; margin: 0 0 6px; }
+.lg-drawing { margin: 10px 0 18px; padding: 10px 14px; border-left: 3px solid var(--border); background: var(--bg-alt); border-radius: 0 var(--radius-sm) var(--radius-sm) 0; }
+.lg-drawing figcaption { font: 600 0.72rem var(--ui); color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; }
+.lg-drawing p { margin: 4px 0 0; }
+.lg-labels { color: var(--text-2); }
+.lg-names { font: 400 0.86rem/1.5 var(--ui); color: var(--text-2); margin: 6px 0 0; }
+.lg-unclear { text-decoration: underline dotted var(--muted); text-underline-offset: 3px; cursor: help; }
+.lg-struck { color: var(--muted); }
+.lg-insert { text-decoration: none; vertical-align: 0.25em; font-size: 0.88em; }
+.lg-margin { font-style: italic; color: var(--text-2); }
+.lg-mark { color: var(--muted); padding: 0 2px; }
+.lg-cancel { font: 600 0.72rem var(--ui); color: var(--review); background: var(--review-bg); border-radius: 4px; padding: 1px 6px; text-transform: uppercase; letter-spacing: 0.06em; }
+.lg-sc { font-variant: small-caps; }
+.strip { position: relative; }
+.strip button { position: relative; }
+.strip .strip-n { position: absolute; inset: auto 0 2px; font: 600 0.68rem var(--ui); color: var(--muted); text-align: center; }
+.strip img + .strip-n { display: none; }
+.collection-switch { margin: 0 0 18px; }
 .download-list { display: grid; gap: 8px; }
 .download { display: flex; align-items: center; gap: 12px; padding: 12px 14px; border: 1px solid var(--hairline); border-radius: 12px; color: var(--text);
   transition: background var(--quick) var(--ease), border-color var(--quick) var(--ease); }

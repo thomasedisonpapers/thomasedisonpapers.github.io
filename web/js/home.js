@@ -1,6 +1,6 @@
 // The landing page: one clear search, then ways in by topic, decade, recently verified work and collection.
 import { catalog, esc, footer, header, icon, logoUrl, plural, sources, summaries, thumbHtml, statusHelp, wireHelp } from "./core.js";
-import { folderEntry, topicCard } from "./cards.js";
+import { entryHref, folderEntry, topicCard } from "./cards.js";
 import { enhanceSelect } from "./controls.js";
 
 const POPULAR = [["Phonograph", "phonograph"], ["Letters to Mina", "to:mina"], ["Storage battery", '"storage battery"'],
@@ -73,7 +73,7 @@ async function render() {
   ${recent.length ? `<section class="block"><div class="wrap">
     <div class="block-head"><div><h2>Recently verified</h2><p>The latest documents an editor has checked against the original. ${statusHelp()}</p></div>
       <a class="see-all" href="search.html?status=approved">All verified ${icon("chevron-right")}</a></div>
-    <div class="shelf">${recent.map((s) => `<a class="shelf-item" href="document.html?id=${encodeURIComponent(s.id)}">
+    <div class="shelf">${recent.map((s) => `<a class="shelf-item" href="${entryHref(s)}">
       ${thumbHtml(s, base, { alt: "" })}<strong>${esc(s.title)}</strong><span>${esc(s.date || "Undated")}</span></a>`).join("")}</div>
   </div></section>` : ""}
 

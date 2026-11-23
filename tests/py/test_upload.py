@@ -415,3 +415,86 @@ def test_a_large_upload_preuploads_files_in_batches(tmp_path):
     hub = FakeHub()
     upload.upload(dataset, "org/repo", hub)
     assert max(map(len, hub.preuploads)) <= upload.BATCH
+
+
+def _volume_hash(volume):
+    content = {k: v for k, v in volume.items() if k not in ("updated", "pdf", "hash")}
+    return hashlib.sha256(json.dumps(content, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
+def _volumes(dataset, volume_id="A234A", scans=(1,), **change):
+    """One published account book of two openings beside the documents, with mirrored scans for the given openings."""
+    opening = lambda n: {"n": n, "id": f"{volume_id}-{n - 1:04d}", "width": 3, "height": 4, "status": "draft", "hash": "h",
+                         "source": f"https://edisondigital.rutgers.edu/files/original/{volume_id}/au{n}.jpg",
+                         "pages": [{"position": "single", "content": "table", "lines": ["Page 2"], "people": [], "places": [],
+                                    "drawings": [], "tables": [{"caption": "", "columns": ["Amount"], "rows": [["5.00"]]}]}]}
+    volume = {"schema": 1, "id": volume_id, "collection": "accounts", "title": "Account, 1873", "status": "draft",
+              "subjects": [], "openings": [opening(1), opening(2)], "pdf": None, "updated": "2026-11-20", **change}
+    volume["hash"] = _volume_hash(volume)
+    root = dataset / "volumes" / volume_id
+    root.mkdir(parents=True)
+    (root / "volume.json").write_text(json.dumps(volume), "utf-8")
+    entry = {"collection": "accounts", "status": "draft", "hash": volume["hash"], "updated": "2026-11-20", "openings": 2}
+    (dataset / "volumes" / "manifest.json").write_text(json.dumps({"volumes": {volume_id: entry}, "withdrawn": []}), "utf-8")
+    for n in scans:
+        (dataset / "scans" / volume_id / "full").mkdir(parents=True, exist_ok=True)
+        (dataset / "scans" / volume_id / "full" / f"{n:04d}.jpg").write_bytes(JPEG)
+    return dataset
+
+
+def test_a_published_account_book_with_its_mirrored_scans_passes_the_boundary_check(tmp_path):
+    assert upload.check(_volumes(_dataset(tmp_path))) == []
+
+
+def test_an_account_book_with_a_field_outside_the_allowlist_is_refused(tmp_path):
+    assert upload.check(_volumes(_dataset(tmp_path), reviewer="Paul Reviewer"))
+
+
+def test_an_account_book_changed_after_its_checksum_was_made_is_refused(tmp_path):
+    dataset = _volumes(_dataset(tmp_path))
+    path = dataset / "volumes" / "A234A" / "volume.json"
+    path.write_text(path.read_text("utf-8").replace("Page 2", "Page 3"), "utf-8")
+    assert upload.check(dataset)
+
+
+def test_an_opening_whose_scan_is_on_another_host_is_refused(tmp_path):
+    dataset = _volumes(_dataset(tmp_path))
+    path = dataset / "volumes" / "A234A" / "volume.json"
+    volume = json.loads(path.read_text("utf-8"))
+    volume["openings"][0]["source"] = "https://example.com/au1.jpg"
+    volume["hash"] = _volume_hash(volume)
+    path.write_text(json.dumps(volume), "utf-8")
+    manifest = json.loads((dataset / "volumes" / "manifest.json").read_text("utf-8"))
+    manifest["volumes"]["A234A"]["hash"] = volume["hash"]
+    (dataset / "volumes" / "manifest.json").write_text(json.dumps(manifest), "utf-8")
+    assert upload.check(dataset)
+
+
+def test_a_mirrored_scan_of_no_published_opening_is_refused(tmp_path):
+    assert upload.check(_volumes(_dataset(tmp_path), scans=(3,)))
+
+
+def test_a_mirrored_scan_that_still_carries_exif_is_refused(tmp_path):
+    dataset = _volumes(_dataset(tmp_path))
+    (dataset / "scans" / "A234A" / "full" / "0001.jpg").write_bytes(JPEG_WITH_EXIF)
+    assert upload.check(dataset)
+
+
+def test_upload_removes_the_last_remote_scan_when_the_local_mirror_is_empty(tmp_path):
+    dataset = _volumes(_dataset(tmp_path), scans=())
+    obsolete = "scans/A234A/full/0001.jpg"
+    hub = FakeHub(files={obsolete: JPEG})
+    upload.upload(dataset, "org/repo", hub)
+    assert obsolete not in hub.files
+
+
+def test_embeddings_of_an_account_book_opening_are_accepted(tmp_path):
+    dataset = _volumes(_dataset(tmp_path))
+    _embeddings(dataset, ids=("E2002AAA", "A234A-0000"))
+    assert upload.check(dataset, embedding_model="arctic-embed-s") == []
+
+
+def test_a_removed_account_books_remote_files_are_deleted_in_the_same_commit(tmp_path):
+    hub = FakeHub(files={"volumes/A100/volume.json": b"{}", "scans/A100/full/0001.jpg": JPEG}, cache=tmp_path / "cache")
+    upload.upload(_volumes(_dataset(tmp_path / "data")), "org/repo", hub)
+    assert not any(path.startswith(("volumes/A100/", "scans/A100/")) for path in hub.files)

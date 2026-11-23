@@ -7,15 +7,17 @@ outlives both. The full design is in `docs/PLAN.md`; read it before starting a m
 
 ## How it fits together
 
-- **Publisher** (lives in edison-pipeline): sends our documents to the Hugging Face dataset whenever an admin
-  approves something or re-exports a folder.
+- **Publisher** (lives in edison-pipeline): sends our documents (`publish`) and account books (`publish-volumes`) to the
+  Hugging Face dataset whenever an admin approves something or re-exports a folder.
 - **`builder/harvest.py`:** mirrors edisondigital's metadata and image derivatives into the dataset, weekly
   and resumably.
+- **`builder/mirror_scans.py`:** copies the published account books' scans from edisondigital into the dataset, a few
+  minutes each publish, gently and resumably.
 - **`builder/build.py`:**
   - merges the two sources (ours wins, per field and per file);
   - writes per-folder JSON to Hugging Face;
   - writes the search database and our thumbnails to GitHub Pages.
-- **`web/`:** the site itself, in vanilla JS. Pages: landing page, search, topic, folder, document.
+- **`web/`:** the site itself, in vanilla JS. Pages: landing page, search, topic, folder, document, account book.
 - **Hosting:** GitHub Pages (the app, search and thumbnails) and a Hugging Face dataset (records, images and
   PDFs). No domain, no server.
 

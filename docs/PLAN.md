@@ -603,3 +603,35 @@ What changes:
   from poured concrete" adds 6 Cement House letters to the 1 keyword hit.
 - **At scale:** above roughly 20,000 passages, `layout` becomes a clustered index on Hugging Face, and only the clusters
   nearest each query are downloaded. See "Scale" above.
+
+## Account books (23 November)
+
+Account books come first among the bound volumes, because they are the smaller set: 207 books and 17,790 scans,
+against 69,976 notebook scans. Every scan has an AI draft and none had been reviewed on 23 November.
+
+- **Decisions with the user:**
+  - every book is published now, each scan labelled "Under review" until an admin accepts it, as drafted documents are;
+  - scans are mirrored to Hugging Face rather than shown from edisondigital;
+  - the viewer draws from the structured pages the review platform itself shows; the PDF stays the platform's LaTeX one.
+- **Publisher** (`edison-pipeline` `public_volumes.py`, CLI `publish-volumes`):
+  - writes `volumes/{ID}/volume.json` from an allowlist (`VOLUME_FIELDS`, `OPENING_FIELDS`, the reviewer page schema);
+  - names people and places by the editors' index forms, and draws subjects from the catalogue series, leaving out
+    filing labels, years and IDs;
+  - copies the platform's `notebook.pdf` only when its stamp matches the text being published;
+  - writes `volumes/manifest.json` last; withdrawals last until restored.
+- **Scan mirror** (`builder/mirror_scans.py`): one request at a time, at least a second apart, honest User-Agent, stopping on
+  the outage page or the bot challenge. It copies each book's first scan before any book's later scans, strips JPEG
+  metadata, makes a 400 px thumbnail, and runs for a few minutes in each publish so it never crowds the schedule.
+- **Upload:** `volumes/` and `scans/` have their own allowlist in `upload.py`, independent of the publisher's, and are
+  managed as whole trees so a removed book is removed from Hugging Face.
+- **Build:**
+  - each scan becomes a searchable entry (type "Account book", collection = its book), with the book's subjects;
+  - amounts and folio numbers are left out of the searchable text (years kept), which halved the index;
+  - account scans make generated topics but are left out of the featured topics, whose descriptions promise letters and papers;
+  - `volumes.json` lists the books for the collections page, with which scans the mirror holds;
+  - the full book records stay on Hugging Face; the reader downloads one book's `volume.json` (at most about 1 MB).
+- **Reader** (`account.html`, `js/account.js`, `js/ledger.js`, `js/latex.js`, shared viewer in `js/reader.js`): the scan
+  beside its ledger pages, with tables set column by column and figures flush right; drafting marks such as `[tick]` and
+  `[struck out: …]` are shown, not printed raw. A scan not yet mirrored is shown from edisondigital as an image only.
+- **Meaning search:** each scan's passages carry the book's title, date and subjects. The vectors grow from about 5,300 to
+  about 25,000; notebooks will need the clustered layout described under "Scale".

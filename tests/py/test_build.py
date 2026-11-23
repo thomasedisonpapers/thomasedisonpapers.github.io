@@ -609,3 +609,114 @@ def test_duplicate_topic_ids_cannot_overwrite_another_topics_membership(dataset)
 
 def test_a_generated_topic_is_described_by_the_heading_it_comes_from():
     assert build.topic_description("Radio", [{"type": "Letter", "year": 1920}]) == "Documents the editors filed under “Radio”, 1920, mostly letters."
+
+
+LEDGER_PAGE = {"position": "single", "content": "table", "lines": ["Gold & Stock Page 2"], "people": ["Gault, Jacob"], "places": ["Newark"],
+               "drawings": [], "tables": [{"caption": "In account with James Hammit", "columns": ["Month", "Day", "Particulars", "Amount"],
+                                           "rows": [["1873", "Jan", "By Cash [tick]", "125.00"], ["", "", "[struck out: Interest] Balance due", "70 00"]]}]}
+
+
+def _account_book(dataset, volume_id="A234A", scans=2, subjects=("Edison & Murray",), mirrored=()):
+    """Publishes one account book of `scans` openings into the test dataset, with mirrored scans for the numbers given."""
+    root = dataset / "dataset"
+    openings = [{"n": n, "id": f"{volume_id}-{n - 1:04d}", "width": 30, "height": 40, "status": "draft",
+                 "source": f"https://edisondigital.rutgers.edu/files/original/{volume_id}/au{n}.jpg", "pages": [LEDGER_PAGE]}
+                for n in range(1, scans + 1)]
+    volume = {"id": volume_id, "collection": "accounts", "title": "Account, Edison and Murray, 1873", "date": "1873",
+              "years": [1873, 1873], "subjects": list(subjects), "series": ["Edison & Murray"], "status": "draft", "openings": openings,
+              "pdf": None}
+    (root / "volumes" / volume_id).mkdir(parents=True)
+    (root / "volumes" / volume_id / "volume.json").write_text(json.dumps(volume), "utf-8")
+    (root / "volumes" / "manifest.json").write_text(json.dumps({"volumes": {volume_id: {"openings": scans}}, "withdrawn": []}), "utf-8")
+    for n in mirrored:
+        for size in ("thumb", "full"):
+            (root / "scans" / volume_id / size).mkdir(parents=True, exist_ok=True)
+            Image.new("RGB", (30, 40), "white").save(root / "scans" / volume_id / size / f"{n:04d}.jpg")
+    return dataset
+
+
+def test_ledger_amounts_are_left_out_of_the_searchable_text_but_years_stay():
+    assert build.opening_text([LEDGER_PAGE]).split("\n")[2] == "1873 Jan By Cash"
+
+
+def test_a_year_followed_by_punctuation_stays_searchable_in_a_ledger():
+    assert build.opening_text([{"lines": ["March 1909, by cash."]}]) == "March 1909, by cash."
+
+
+def test_a_struck_out_word_is_still_searchable_as_written():
+    assert "Interest Balance due" in build.opening_text([LEDGER_PAGE])
+
+
+def test_an_opening_is_described_by_its_account_heading():
+    assert build.opening_description([LEDGER_PAGE]) == "In account with James Hammit"
+
+
+def test_every_account_book_scan_becomes_a_searchable_entry(dataset):
+    assert _build(_account_book(dataset))["documents"] == 5
+
+
+def test_an_account_book_scan_opens_in_the_account_reader_at_its_scan(dataset):
+    _build(_account_book(dataset))
+    summary = next(s for s in _data(dataset, "docs/0.json") if s["id"] == "A234A-0001")
+    assert (summary["kind"], summary["volume"], summary["scan"]) == ("account", "A234A", 2)
+
+
+def test_an_account_book_scan_is_found_by_a_name_in_its_ledger(dataset):
+    _build(_account_book(dataset))
+    shard = _data(dataset, f"index/{textindex.shard_of(textindex.stem('hammit'))}.json")
+    assert textindex.stem("hammit") in shard
+
+
+def test_a_scan_not_yet_mirrored_has_no_thumbnail(dataset):
+    _build(_account_book(dataset))
+    assert next(s for s in _data(dataset, "docs/0.json") if s["id"] == "A234A-0000")["thumb"] is None
+
+
+def test_a_mirrored_scan_uses_the_mirrors_thumbnail_from_the_data_host(dataset):
+    _build(_account_book(dataset, mirrored=(1,)))
+    summary = next(s for s in _data(dataset, "docs/0.json") if s["id"] == "A234A-0000")
+    assert (summary["thumb"], summary["thumb_from"]) == ("scans/A234A/thumb/0001.jpg", "dataset")
+
+
+def test_the_book_list_gives_each_account_book_its_scan_count_and_cover(dataset):
+    _build(_account_book(dataset, mirrored=(1,)))
+    assert [(v["id"], v["count"], v["thumb"]) for v in _data(dataset, "volumes.json")] == [("A234A", 2, "scans/A234A/thumb/0001.jpg")]
+
+
+def test_the_catalogue_names_each_account_book_for_the_collection_filter(dataset):
+    _build(_account_book(dataset))
+    assert _data(dataset, "catalog.json")["volumes"] == [{"id": "A234A", "title": "Account, Edison and Murray, 1873"}]
+
+
+def test_an_account_books_subject_becomes_a_topic_once_it_holds_enough_scans(dataset, monkeypatch):
+    monkeypatch.setattr(build, "TOPIC_MIN_DOCUMENTS", 2)
+    _build(_account_book(dataset))
+    assert any(t["title"] == "Edison & Murray" and t["count"] == 2 for t in _data(dataset, "topics.json"))
+
+
+def test_a_featured_topic_leaves_out_ledger_scans_filed_under_its_subject(dataset):
+    (dataset / "web" / "data" / "topics.json").write_text(json.dumps([{"id": "cement", "title": "Cement", "subjects": ["cement"]}]), "utf-8")
+    _build(_account_book(dataset, subjects=("Edison Portland Cement Company",)))
+    assert next(t for t in _data(dataset, "topics.json") if t["id"] == "cement")["count"] == 0
+
+
+def test_a_withdrawn_account_book_is_left_out_of_the_build(dataset):
+    _account_book(dataset)
+    path = dataset / "dataset" / "volumes" / "manifest.json"
+    path.write_text(json.dumps({"volumes": {"A234A": {}}, "withdrawn": ["A234A"]}), "utf-8")
+    assert _build(dataset)["documents"] == 3
+
+
+def test_an_opening_that_shares_an_id_with_a_document_stops_the_build(dataset):
+    _account_book(dataset, volume_id="E2002AAA")
+    path = dataset / "dataset" / "volumes" / "E2002AAA" / "volume.json"
+    volume = json.loads(path.read_text("utf-8"))
+    volume["openings"][0]["id"] = "E2002AAB"
+    path.write_text(json.dumps(volume), "utf-8")
+    with pytest.raises(build.BuildError):
+        _build(dataset)
+
+
+def test_the_book_list_says_which_scans_the_mirror_holds_as_ranges(dataset):
+    _build(_account_book(dataset, scans=4, mirrored=(1, 2, 4)))
+    assert _data(dataset, "volumes.json")[0]["mirrored"] == "1-2,4"

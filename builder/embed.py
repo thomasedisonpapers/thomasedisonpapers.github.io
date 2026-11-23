@@ -57,10 +57,13 @@ def wanted(dataset: Path, scope: str) -> dict[str, list[tuple[str, str]]]:
     records, _ = build.merge(local, remote)
     for document_id in manifest.get("withdrawn", []):
         records.pop(document_id, None)
+    # Account-book openings are searched by meaning like documents, from the same records the site builds them from.
+    build.add_openings(records, build.opening_records(build.load_volumes(dataset)))
     planned = {}
     for document_id, record in sorted(records.items()):
         if in_scope(record, scope):
-            record["description"] = build.description_for(record, remote.get(document_id, {}))
+            if record.get("kind") != "account":
+                record["description"] = build.description_for(record, remote.get(document_id, {}))
             planned[document_id] = [(key_of(text), text) for text in passages(record)]
     return planned
 
@@ -364,16 +367,21 @@ def document_vectors(root: Path) -> tuple[list[str], np.ndarray]:
     return ids, np.array(out, dtype=np.float32)
 
 
-def related(root: Path, k: int = 8, block: int = 4096) -> dict[str, list[list]]:
+def related(root: Path, k: int = 8, block: int = 256) -> dict[str, list[list]]:
     """Each document's k nearest other documents with their cosine similarity, computed in blocks so memory stays bounded."""
     ids, vectors = document_vectors(root)
     limit = max(0, min(k, len(ids) - 1))
+    if not limit:
+        return {document_id: [] for document_id in ids}
     out = {}
     for start in range(0, len(ids), block):
         scores = vectors[start:start + block] @ vectors.T
         for i in range(scores.shape[0]):
             scores[i, start + i] = -np.inf
-        top = np.argsort(-scores, axis=1)[:, :limit]
+        # Select the nearest neighbours before sorting, so full rankings never have to be ordered.
+        top = np.argpartition(-scores, limit - 1, axis=1)[:, :limit]
+        order = np.argsort(-np.take_along_axis(scores, top, axis=1), axis=1, kind="stable")
+        top = np.take_along_axis(top, order, axis=1)
         for i, row in enumerate(top):
             out[ids[start + i]] = [[ids[j], round(float(scores[i, j]), 4)] for j in row]
     return out
@@ -446,7 +454,7 @@ def main(argv=None) -> int:
         else:
             result = related(args.store / args.model)
             _write_json(args.out or args.store / args.model / "related.json", result)
-    except EmbedError as error:
+    except (EmbedError, build.BuildError) as error:
         logger.error("refused: %s", error)
         return 1
     return 0

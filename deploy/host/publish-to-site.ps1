@@ -42,15 +42,29 @@ try {
     Invoke-Step "publishing" $python @("-m", "edison_pipeline.cli", "publish", "--db", "data/extraction.db",
         "--bucket-uri", "file://./data/bucket", "--out", $Dataset, "--folders", $Folders,
         "--exports", "data/exports/new", "--site-url", $SiteUrl)
+    Invoke-Step "publishing account books" $python @("-m", "edison_pipeline.cli", "publish-volumes", "--db", "data/extraction.db",
+        "--bucket-uri", "file://./data/bucket", "--out", $Dataset)
     $env:PYTHONPATH = $null
     $archivePython = Join-Path $Archive ".venv\Scripts\python.exe"
+    # A few minutes of gentle copying each run, so the account-book scans reach the dataset over a day without crowding the schedule.
+    Invoke-Step "mirroring account-book scans" $archivePython @((Join-Path $Archive "builder\mirror_scans.py"), "--dataset", $Dataset,
+        "--contact", "$SiteUrl/about.html", "--minutes", "8")
     $embed = Join-Path $Archive "builder\embed.py"
     $store = Join-Path $Dataset "embeddings"
+    $upload = Join-Path $Archive "builder\upload.py"
     # Publish records independently if embedding fails so withdrawals never wait for the model.
     $uploadModel = "arctic-embed-s"
+    $recordsUploaded = $false
     try {
         Invoke-Step "planning embeddings" $archivePython @($embed, "plan", "--dataset", $Dataset, "--store", $store,
             "--model", "arctic-embed-s", "--scope", "transcribed")
+        $todo = Join-Path $store "arctic-embed-s\todo"
+        if (Test-Path -LiteralPath (Join-Path $todo "chunk-00001.jsonl") -PathType Leaf) {
+            # A large backfill can outlast the publish interval, so make the records visible before encoding.
+            Invoke-Step "uploading records before embedding backfill" $archivePython @($upload, "--dataset", $Dataset,
+                "--embedding-model", "none")
+            $recordsUploaded = $true
+        }
         Invoke-Step "encoding new passages" $archivePython @($embed, "encode", "--store", $store, "--model", "arctic-embed-s",
             "--backend", "onnx", "--batch", "16")
         Invoke-Step "collecting embeddings" $archivePython @($embed, "collect", "--store", $store, "--model", "arctic-embed-s")
@@ -59,8 +73,9 @@ try {
         Write-Log "embedding skipped this run: $_"
         $uploadModel = "none"
     }
-    Invoke-Step "uploading" $archivePython @((Join-Path $Archive "builder\upload.py"), "--dataset", $Dataset,
-        "--embedding-model", $uploadModel)
+    if (-not $recordsUploaded -or $uploadModel -ne "none") {
+        Invoke-Step "uploading" $archivePython @($upload, "--dataset", $Dataset, "--embedding-model", $uploadModel)
+    }
     Write-Log "done"
 } catch {
     Write-Log "FAILED: $_"

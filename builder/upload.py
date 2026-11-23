@@ -1,6 +1,6 @@
 """Validates the published dataset, uploads one atomic revision, then verifies it file by file.
 
-Only `local/` (from the publisher) and `embeddings/` are managed here; `edisondigital/` belongs to the harvester and is never touched.
+Only `local/` and `volumes/` (from the publisher), `scans/` (mirrored account-book scans) and `embeddings/` are managed here; `edisondigital/` belongs to the harvester and is never touched.
 The token comes from the HF_TOKEN environment variable or the machine's Hugging Face login, and is never printed or passed on the command line.
 """
 from __future__ import annotations
@@ -37,15 +37,33 @@ EMBED_MANIFEST_FIELDS = {
     **dict.fromkeys(("dim", "documents", "passages"), (int,)),
     "parts": (list,),
 }
+VOLUME_LISTS = ("series", "subjects", "parties", "people", "places")
+VOLUME_FIELDS = {
+    **dict.fromkeys(("id", "collection", "title", "catalogue_title", "date", "description", "status", "status_label", "pdf",
+                     "updated", "hash"), (str, type(None))),
+    **dict.fromkeys(VOLUME_LISTS, (list,)),
+    "schema": (int,), "years": (list,), "openings": (list,), "edisondigital": (dict, type(None)),
+}
+OPENING_FIELDS = {"n": (int,), "id": (str,), "width": (int, type(None)), "height": (int, type(None)), "source": (str,),
+                  "status": (str,), "pages": (list,), "latex": (str,), "hash": (str,)}
+VOLUME_PAGE_FIELDS = {**dict.fromkeys(("position", "content"), (str,)),
+                      **dict.fromkeys(("lines", "tables", "drawings", "people", "places"), (list,))}
+VOLUMES_MANIFEST_FIELDS = {"schema": (int,), "generated_at": (str,), "volumes": (dict,), "withdrawn": (list,)}
+VOLUME_ENTRY_FIELDS = {**dict.fromkeys(("collection", "status", "hash", "updated"), (str,)), "openings": (int,)}
+COLLECTIONS = {"accounts"}
+STATUSES = {"approved", "draft"}
+# The only hosts a scan may be mirrored from, checked again here so a bad record cannot point the mirror elsewhere.
+SCAN_SOURCE = re.compile(r"^https://(?:edisondigital\.rutgers\.edu|iiif\.archive\.org)/[^\s\\]*$")
+SCAN_FILE = re.compile(r"^scans/([A-Za-z0-9_-]+)/(thumb|full)/(\d{4})\.jpg$")
 # Folders made to test the review platform, which must never reach the public.
 TEST_FOLDER = re.compile(r"TEST|^SPLITUI$", re.IGNORECASE)
 SAFE_ID = re.compile(r"^[A-Za-z0-9_-]+$")
 PART_NAME = re.compile(r"part-\d{5}")
 PASSAGE_KEY = re.compile(r"[0-9a-f]{20}")
-MANAGED = ("local/", "embeddings/")
+MANAGED = ("local/", "volumes/", "scans/", "embeddings/")
 # The embedding files the site reads; plans and evaluation queries stay on the machine that made them.
 EMBEDDING_FILE = re.compile(r"^embeddings/[a-z0-9.-]+/(manifest\.json|documents\.jsonl|related\.json|parts/part-\d{5}\.(npy|keys))$")
-POINTER = re.compile(r"^(local/manifest\.json|embeddings/[a-z0-9.-]+/manifest\.json)$")
+POINTER = re.compile(r"^((?:local|volumes)/manifest\.json|embeddings/[a-z0-9.-]+/manifest\.json)$")
 # Bound the number of files in each pre-upload request.
 BATCH = 100
 
@@ -57,7 +75,7 @@ class UploadError(Exception):
 def local_files(dataset: Path, *, embedding_model: str | None = None) -> dict[str, Path]:
     """Every file that belongs in the repository, by its path there; hidden bookkeeping such as `.publish-state` is never included."""
     files = {}
-    roots = ["local"]
+    roots = ["local", "volumes", "scans"]
     if embedding_model != "none":
         roots.append(f"embeddings/{embedding_model}" if embedding_model else "embeddings")
     for top in roots:
@@ -68,7 +86,7 @@ def local_files(dataset: Path, *, embedding_model: str | None = None) -> dict[st
             rel = path.relative_to(dataset).as_posix()
             if not path.is_file() or any(part.startswith(".") for part in rel.split("/")):
                 continue
-            if top != "local" and not EMBEDDING_FILE.fullmatch(rel):
+            if top.startswith("embeddings") and not EMBEDDING_FILE.fullmatch(rel):
                 continue
             files[rel] = path
     return files
@@ -219,12 +237,16 @@ def _check(dataset: Path, embedding_model: str | None) -> list[str]:
                 problems.append(f"{document_id} points outside its folder: {name!r}")
             else:
                 allowed.add(f"local/{document_id}/{Path(name).as_posix()}")
+    openings = check_volumes(dataset, problems, allowed)
     files = local_files(dataset, embedding_model=embedding_model)
     root = dataset.resolve()
     for rel, path in files.items():
         if path.is_symlink() or not path.resolve().is_relative_to(root):
             problems.append(f"{rel} must be a file inside the dataset")
-        if not rel.startswith("local/"):
+        if rel.startswith("scans/"):
+            check_scan(rel, path, openings, problems)
+            continue
+        if not rel.startswith(("local/", "volumes/")):
             continue
         if rel not in allowed:
             problems.append(f"{rel} is not part of any published document")
@@ -242,10 +264,93 @@ def _check(dataset: Path, embedding_model: str | None) -> list[str]:
     for name, path in files.items():
         if name.startswith("embeddings/"):
             models.setdefault(name.split("/")[1], set()).add(path)
-    published_ids = set(published)
+    published_ids = set(published) | {o for numbers in openings.values() for o in numbers.values()}
     for model, paths in models.items():
         check_embeddings(dataset / "embeddings" / model, paths, published_ids, problems)
     return problems
+
+
+def check_volumes(dataset: Path, problems: list[str], allowed: set[str]) -> dict[str, dict[int, str]]:
+    """Checks every published volume against its own allowlist, and returns each volume's openings by scan number."""
+    manifest_path = dataset / "volumes" / "manifest.json"
+    if not manifest_path.exists():
+        return {}
+    allowed.add("volumes/manifest.json")
+    manifest = checked_fields(read_json(manifest_path), VOLUMES_MANIFEST_FIELDS, "volumes/manifest.json", problems)
+    withdrawn_ids = manifest.get("withdrawn", [])
+    withdrawn = {v for v in withdrawn_ids if safe_id(v)}
+    if any(not safe_id(v) for v in withdrawn_ids):
+        problems.append("volumes/manifest.json has an invalid withdrawn ID")
+    openings: dict[str, dict[int, str]] = {}
+    for volume_id, entry in manifest.get("volumes", {}).items():
+        entry = checked_fields(entry, VOLUME_ENTRY_FIELDS, f"manifest volume {volume_id}", problems)
+        if not safe_id(volume_id) or volume_id in withdrawn:
+            problems.append(f"{volume_id!r} cannot be published as a volume")
+            continue
+        path = dataset / "volumes" / volume_id / "volume.json"
+        if not path.exists():
+            problems.append(f"volumes/{volume_id}/volume.json is missing")
+            continue
+        raw = read_json(path)
+        volume = checked_fields(raw, VOLUME_FIELDS, volume_id, problems)
+        label = f"volume {volume_id}"
+        if volume.get("id") != volume_id or volume.get("collection") not in COLLECTIONS or volume.get("status") not in STATUSES:
+            problems.append(f"{label} has the wrong id, collection or status")
+        if any(not isinstance(item, str) for field in VOLUME_LISTS for item in volume.get(field) or []):
+            problems.append(f"{label} lists must contain only text")
+        if volume.get("edisondigital") is not None:
+            checked_fields(volume["edisondigital"], {"item": (str,), "manifest": (str,)}, f"{label}.edisondigital", problems)
+        if (any(volume.get(field) != value for field, value in entry.items() if field != "openings")
+                or entry.get("openings") != len(volume.get("openings", []))):
+            problems.append(f"{label} does not match its manifest entry")
+        content = {key: value for key, value in volume.items() if key not in ("updated", "pdf", "hash")}
+        if volume.get("hash") != hashlib.sha256(json.dumps(content, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest():
+            problems.append(f"{label} does not match its checksum")
+        numbers = openings.setdefault(volume_id, {})
+        for opening in volume.get("openings", []):
+            opening = checked_fields(opening, OPENING_FIELDS, f"{label} opening", problems)
+            n = opening.get("n")
+            if not isinstance(n, int) or not 1 <= n <= 9999 or opening.get("id") != f"{volume_id}-{n - 1:04d}" or n in numbers:
+                problems.append(f"{label} has an opening with the wrong number or id")
+                continue
+            source = opening.get("source")
+            if (source != "" and not SCAN_SOURCE.fullmatch(source or "")) or opening.get("status") not in STATUSES:
+                problems.append(f"{label} opening {n} has a scan source or status that is not allowed")
+            for page in opening.get("pages", []):
+                page = checked_fields(page, VOLUME_PAGE_FIELDS, f"{label} opening {n} page", problems)
+                check_volume_page(page, f"{label} opening {n}", problems)
+            numbers[n] = opening.get("id")
+        allowed.add(f"volumes/{volume_id}/volume.json")
+        if volume.get("pdf"):
+            if volume["pdf"] != f"{volume_id}.pdf":
+                problems.append(f"{label} names a PDF other than its own")
+            allowed.add(f"volumes/{volume_id}/{volume_id}.pdf")
+    return openings
+
+
+def check_volume_page(page: dict, label: str, problems: list[str]) -> None:
+    def texts(values) -> bool:
+        return isinstance(values, list) and all(isinstance(v, str) for v in values)
+
+    if not all(texts(page.get(field, [])) for field in ("lines", "people", "places")):
+        problems.append(f"{label} page text must be lists of text")
+    for table in page.get("tables", []):
+        table = checked_fields(table, {"caption": (str,), "columns": (list,), "rows": (list,)}, f"{label} table", problems)
+        if not texts(table.get("columns", [])) or not all(texts(row) for row in table.get("rows", [])):
+            problems.append(f"{label} table cells must be text")
+    for drawing in page.get("drawings", []):
+        drawing = checked_fields(drawing, {"summary": (str,), "labels": (list,)}, f"{label} drawing", problems)
+        if not texts(drawing.get("labels", [])):
+            problems.append(f"{label} drawing labels must be text")
+
+
+def check_scan(rel: str, path: Path, openings: dict[str, dict[int, str]], problems: list[str]) -> None:
+    """A mirrored scan must belong to a published opening and carry no camera or software metadata."""
+    match = SCAN_FILE.fullmatch(rel)
+    if not match or int(match.group(3)) not in openings.get(match.group(1), {}):
+        problems.append(f"{rel} is not a scan of any published opening")
+    elif has_jpeg_metadata(path.read_bytes()):
+        problems.append(f"{rel} still carries image metadata")
 
 
 def check_embeddings(model: Path, files: set[Path], published: set[str], problems: list[str]) -> None:
@@ -380,6 +485,7 @@ def _affected_remote_models(dataset: Path, api, repo: str, revision: str, remote
     manifest = read_json(dataset / "local" / "manifest.json")
     published = {doc for folder in manifest["folders"].values() for doc in folder.get("documents", {})}
     published.difference_update(manifest.get("withdrawn", []))
+    published.update(o for numbers in check_volumes(dataset, [], set()).values() for o in numbers.values())
     models: dict[str, set[str]] = {}
     for path in remote:
         if path.startswith("embeddings/") and path.count("/") >= 2:
@@ -470,7 +576,10 @@ def _upload(dataset: Path, repo: str, api, *, dry_run: bool, embedding_model: st
     files = local_files(dataset, embedding_model=embedding_model)
     changed = [p for p in files if not POINTER.match(p) and not (p in remote and _same(files[p], remote[p]))]
     pointers = [p for p in files if POINTER.match(p) and not (p in remote and _same(files[p], remote[p]))]
-    managed = {"local/" if path.startswith("local/") else "/".join(path.split("/")[:2]) + "/" for path in files}
+    managed = {path.split("/")[0] + "/" if path.startswith(("local/", "volumes/", "scans/")) else "/".join(path.split("/")[:2]) + "/"
+               for path in files}
+    if "volumes/manifest.json" in files:
+        managed.add("scans/")
     managed.update(_affected_remote_models(dataset, api, repo, info.sha, remote, managed))
     managed = tuple(sorted(managed))
     stale = sorted(p for p in remote if p.startswith(managed) and p not in files)
