@@ -119,3 +119,9 @@ for (const file of readdirSync(BUILDER).filter((name) => name.endsWith(".py"))) 
     assert.doesNotMatch(readFileSync(new URL(file, BUILDER), "utf-8"), HOSTED);
   });
 }
+
+// Safari ignores a stylesheet inside an external sprite, so each icon must carry its own stroke (report: icons broken on phones).
+test("every icon in the sprite draws its own outline without a stylesheet", () => {
+  const symbols = read("img/icons.svg").match(/<symbol[^>]*>/g);
+  assert.ok(symbols.every((tag) => /fill="none"/.test(tag) && /stroke="currentColor"/.test(tag)));
+});
