@@ -63,6 +63,8 @@ PASSAGE_KEY = re.compile(r"[0-9a-f]{20}")
 MANAGED = ("local/", "volumes/", "scans/", "embeddings/")
 # The embedding files the site reads; plans and evaluation queries stay on the machine that made them.
 EMBEDDING_FILE = re.compile(r"^embeddings/[a-z0-9.-]+/(manifest\.json|documents\.jsonl|related\.json|parts/part-\d{5}\.(npy|keys))$")
+MANIFESTS = ("local/manifest.json", "volumes/manifest.json")
+SCAN_REMOVAL_LIMIT = 1000
 POINTER = re.compile(r"^((?:local|volumes)/manifest\.json|embeddings/[a-z0-9.-]+/manifest\.json)$")
 # Bound the number of files in each pre-upload request.
 BATCH = 100
@@ -84,7 +86,8 @@ def local_files(dataset: Path, *, embedding_model: str | None = None) -> dict[st
             continue
         for path in sorted(root.rglob("*")):
             rel = path.relative_to(dataset).as_posix()
-            if not path.is_file() or any(part.startswith(".") for part in rel.split("/")):
+            # A file still being written (.part) is never part of a release.
+            if not path.is_file() or rel.endswith(".part") or any(part.startswith(".") for part in rel.split("/")):
                 continue
             if top.startswith("embeddings") and not EMBEDDING_FILE.fullmatch(rel):
                 continue
@@ -467,8 +470,8 @@ def remote_files(api, repo: str, revision: str) -> dict:
             if hasattr(item, "blob_id")}
 
 
-def _same_public_manifest(path: Path, api, repo: str, revision: str) -> bool:
-    published_path = api.hf_hub_download(repo, "local/manifest.json", repo_type="dataset", revision=revision)
+def _same_public_manifest(path: Path, api, repo: str, revision: str, name: str = "local/manifest.json") -> bool:
+    published_path = api.hf_hub_download(repo, name, repo_type="dataset", revision=revision)
     try:
         local, published = read_json(path), read_json(Path(published_path))
     except ValueError:
@@ -583,9 +586,15 @@ def _upload(dataset: Path, repo: str, api, *, dry_run: bool, embedding_model: st
     managed.update(_affected_remote_models(dataset, api, repo, info.sha, remote, managed))
     managed = tuple(sorted(managed))
     stale = sorted(p for p in remote if p.startswith(managed) and p not in files)
-    manifest = "local/manifest.json"
-    timestamp_only = (not changed and not stale and pointers == [manifest] and manifest in remote
-                      and _same_public_manifest(files[manifest], api, repo, info.sha))
+    remote_scans = sum(1 for p in remote if p.startswith("scans/"))
+    stale_scans = sum(1 for p in stale if p.startswith("scans/"))
+    if stale_scans > SCAN_REMOVAL_LIMIT and stale_scans * 2 > remote_scans:
+        # Taking down a book removes a few hundred scans; losing most of them means the local copy is incomplete.
+        raise UploadError(f"refusing to remove {stale_scans} of {remote_scans} mirrored scans; the local dataset looks incomplete")
+    # A manifest whose only change is its timestamp is not a release, so an idle run makes no commit and no rebuild.
+    timestamp_only = (not changed and not stale and bool(pointers) and all(
+        p in MANIFESTS and p in remote and _same_public_manifest(files[p], api, repo, info.sha, p) for p in pointers))
+    held = set(pointers) if timestamp_only else set()
     if timestamp_only:
         pointers = []
     plan = {"upload": len(changed), "manifests": len(pointers), "remove": len(stale), "files": len(files)}
@@ -602,7 +611,7 @@ def _upload(dataset: Path, repo: str, api, *, dry_run: bool, embedding_model: st
         commit = api.create_commit(repo, operations, repo_type="dataset", revision="main", parent_commit=info.sha,
                                    commit_message="Publish archive dataset")
         landed = remote_files(api, repo, commit.oid)
-    wrong = [p for p in files if not (timestamp_only and p == manifest)
+    wrong = [p for p in files if p not in held
              and (p not in landed or not _same(files[p], landed[p]))]
     extra = [p for p in landed if p.startswith(managed) and p not in files]
     if wrong or extra:

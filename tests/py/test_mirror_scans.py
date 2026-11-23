@@ -162,3 +162,44 @@ def test_a_pause_of_at_least_a_second_separates_requests(tmp_path):
     fetcher = mirror_scans.Fetcher("https://example.org/about", session=FakeSession(), sleep=pauses.append)
     mirror_scans.mirror(_dataset(tmp_path), fetcher)
     assert pauses and min(pauses) >= 1.0
+
+
+def test_scans_already_on_disk_are_kept_when_the_mirrors_record_is_lost(tmp_path):
+    dataset = _dataset(tmp_path)
+    mirror_scans.mirror(dataset, _fetcher(FakeSession()))
+    (dataset / mirror_scans.STATE).unlink()
+    session = FakeSession()
+    mirror_scans.mirror(dataset, _fetcher(session))
+    assert session.asked == []
+
+
+def test_a_scan_edisondigital_would_not_give_is_not_asked_for_again_the_same_day(tmp_path):
+    dataset = _dataset(tmp_path, volumes=(("A200", 1),))
+    mirror_scans.mirror(dataset, _fetcher(FakeSession(default=FakeResponse("", status=404))), now=lambda: 1000.0)
+    session = FakeSession()
+    mirror_scans.mirror(dataset, _fetcher(session), now=lambda: 2000.0)
+    assert session.asked == []
+
+
+def test_a_scan_that_failed_yesterday_is_tried_again(tmp_path):
+    dataset = _dataset(tmp_path, volumes=(("A200", 1),))
+    mirror_scans.mirror(dataset, _fetcher(FakeSession(default=FakeResponse("", status=404))), now=lambda: 1000.0)
+    session = FakeSession()
+    mirror_scans.mirror(dataset, _fetcher(session), now=lambda: 1000.0 + mirror_scans.RETRY_FAILED_SECONDS + 1)
+    assert len(session.asked) == 1
+
+
+def test_a_struggling_site_stops_the_run_once_its_time_is_spent_rather_than_waiting_it_out(tmp_path):
+    waits = []
+    fetcher = mirror_scans.Fetcher("https://example.org/about", session=FakeSession(default=FakeResponse("", status=503)),
+                                   sleep=waits.append)
+    mirror_scans.mirror(_dataset(tmp_path), fetcher, minutes=0.5)
+    assert sum(waits) < 30
+
+
+def test_a_write_cut_short_leaves_no_part_file_for_the_upload_to_refuse(tmp_path):
+    dataset = _dataset(tmp_path, volumes=(("A200", 1),))
+    (dataset / "scans" / "A200" / "full").mkdir(parents=True)
+    (dataset / "scans" / "A200" / "full" / "0001.jpg.part").write_bytes(b"half")
+    mirror_scans.mirror(dataset, _fetcher(FakeSession()))
+    assert not list((dataset / "scans").rglob("*.part"))

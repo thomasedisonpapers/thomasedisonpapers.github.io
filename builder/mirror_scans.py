@@ -26,6 +26,8 @@ SCAN_HOSTS = {"edisondigital.rutgers.edu", "iiif.archive.org"}
 THUMB_WIDTH = 400
 MAX_BYTES = 40 * 1024 * 1024
 STATE = ".mirror-state/scans.json"
+# A scan edisondigital would not give is asked for again a day later, not at the head of every run.
+RETRY_FAILED_SECONDS = 24 * 3600
 _SAFE_ID = re.compile(r"^[A-Za-z0-9_-]+$")
 # JPEG segments that carry camera, location and editing metadata rather than the picture (as the publisher strips them).
 _METADATA_MARKERS = {0xE1, 0xED}
@@ -67,8 +69,16 @@ class Fetcher:
         self.session.headers["User-Agent"] = f"EdisonPapersArchiveMirror/1.0 (+{contact})"
         self.sleep, self.delay, self.requests = sleep, max(MIN_DELAY_SECONDS, delay), 0
 
-    def get(self, url: str) -> bytes | None:
-        """The scan's bytes; None when this one scan cannot be had, and Outage when the whole site should be left alone."""
+    def get(self, url: str, remaining=None) -> bytes | None:
+        """The scan's bytes; None when this one scan cannot be had, and Outage when the whole site should be left alone.
+
+        `remaining()` gives the run's seconds left, so a struggling site never holds the publish past its budget.
+        """
+        def wait(seconds: float) -> None:
+            if remaining is not None and remaining() <= seconds:
+                raise Outage("edisondigital is struggling and this run's time is spent")
+            self.sleep(seconds)
+
         for attempt in range(MAX_ATTEMPTS):
             if self.requests:
                 self.sleep(self.delay)
@@ -77,7 +87,7 @@ class Fetcher:
                 response = self.session.get(url, timeout=TIMEOUT_SECONDS)
             except requests.RequestException as exc:
                 logger.warning("request failed (%s); backing off", exc)
-                self.sleep(min(MAX_WAIT_SECONDS, 30 * 2 ** attempt) + random.uniform(0, 5))
+                wait(min(MAX_WAIT_SECONDS, 30 * 2 ** attempt) + random.uniform(0, 5))
                 continue
             urls = [getattr(r, "url", "") or "" for r in [*getattr(response, "history", []), response]]
             if any(OUTAGE_HOST in u or BOT_CHALLENGE_PATH in u for u in urls):
@@ -85,7 +95,7 @@ class Fetcher:
             if response.status_code in (403, 429) or response.status_code >= 500:
                 pause = _retry_after(response.headers.get("Retry-After"), attempt)
                 logger.warning("%s answered %s; waiting %.0fs", urlparse(url).hostname, response.status_code, pause)
-                self.sleep(pause + random.uniform(0, 5))
+                wait(pause + random.uniform(0, 5))
                 continue
             if response.status_code != 200:
                 logger.warning("%s answered %s; skipped this run", url, response.status_code)
@@ -140,6 +150,10 @@ def remove_unpublished(dataset: Path, openings: list[tuple[str, int, str]]) -> i
     root = dataset / "scans"
     if not root.is_dir():
         return 0
+    # A write cut short leaves a .part file, which the upload would refuse as a stray.
+    for leftover in root.rglob("*.part"):
+        leftover.unlink()
+        removed += 1
     for directory in root.iterdir():
         if directory.is_dir() and directory.name not in volumes:
             shutil.rmtree(directory)
@@ -152,10 +166,19 @@ def remove_unpublished(dataset: Path, openings: list[tuple[str, int, str]]) -> i
     return removed
 
 
-def mirror(dataset: Path, fetcher: Fetcher, *, minutes: float = 10, limit: int | None = None, clock=time.monotonic) -> dict:
+def _is_jpeg(path: Path) -> bool:
+    with path.open("rb") as file:
+        return file.read(2) == b"\xff\xd8"
+
+
+def mirror(dataset: Path, fetcher: Fetcher, *, minutes: float = 10, limit: int | None = None, clock=time.monotonic,
+           now=time.time) -> dict:
     """Mirrors scans not yet copied (or whose source changed) until the time or count budget is spent, saving progress as it goes."""
     state_path = dataset / STATE
-    state = json.loads(state_path.read_text("utf-8")) if state_path.exists() else {}
+    try:
+        state = json.loads(state_path.read_text("utf-8")) if state_path.exists() else {}
+    except ValueError:
+        state = {}
     if not (dataset / "volumes" / "manifest.json").exists():
         return {"copied": 0, "skipped": 0, "removed": 0, "mirrored": 0, "openings": 0, "outage": ""}
     openings = published_openings(dataset)
@@ -168,8 +191,17 @@ def mirror(dataset: Path, fetcher: Fetcher, *, minutes: float = 10, limit: int |
         key = f"{volume_id}/{n}"
         paths = scan_paths(dataset, volume_id, n)
         previous = state.get(key, {})
-        if previous.get("source") == source and all(path.is_file() for path in paths.values()):
-            current[key] = previous
+        whole = all(path.is_file() for path in paths.values())
+        if previous.get("source") == source:
+            if previous.get("sha256") and whole:
+                current[key] = previous
+                continue
+            if previous.get("failed") and now() - previous["failed"] < RETRY_FAILED_SECONDS:
+                current[key] = previous
+                continue
+        elif not previous and whole and _is_jpeg(paths["full"]):
+            # A scan already on disk is kept when the record of it was lost, rather than deleted and fetched again.
+            current[key] = {"source": source, "sha256": hashlib.sha256(paths["full"].read_bytes()).hexdigest()}
             continue
         # An old scan must stop being served even when the new source cannot be fetched this run.
         for path in paths.values():
@@ -181,21 +213,23 @@ def mirror(dataset: Path, fetcher: Fetcher, *, minutes: float = 10, limit: int |
         for volume_id, n, source in todo:
             if clock() >= deadline or (limit is not None and copied >= limit):
                 break
-            data = fetcher.get(source)
-            if data is None:
-                skipped += 1
-                continue
-            full = strip_jpeg_metadata(data)
-            try:
-                thumb = thumbnail(full)
-            except (OSError, ValueError, Image.DecompressionBombError):
-                logger.warning("cannot read scan for %s, opening %s", volume_id, n)
+            key = f"{volume_id}/{n}"
+            data = fetcher.get(source, remaining=lambda: deadline - clock())
+            thumb = None
+            if data is not None:
+                full = strip_jpeg_metadata(data)
+                try:
+                    thumb = thumbnail(full)
+                except (OSError, ValueError, Image.DecompressionBombError):
+                    logger.warning("cannot read scan for %s, opening %s", volume_id, n)
+            if thumb is None:
+                current[key] = {"source": source, "failed": now()}
                 skipped += 1
                 continue
             paths = scan_paths(dataset, volume_id, n)
             _write(paths["full"], full)
             _write(paths["thumb"], thumb)
-            current[f"{volume_id}/{n}"] = {"source": source, "sha256": hashlib.sha256(full).hexdigest()}
+            current[key] = {"source": source, "sha256": hashlib.sha256(full).hexdigest()}
             copied += 1
             if copied % 25 == 0:
                 _write(state_path, json.dumps(current, sort_keys=True).encode("utf-8"))
@@ -203,7 +237,7 @@ def mirror(dataset: Path, fetcher: Fetcher, *, minutes: float = 10, limit: int |
         outage = str(exc)
         logger.warning("stopped: %s", exc)
     _write(state_path, json.dumps(current, sort_keys=True).encode("utf-8"))
-    done = len(current)
+    done = sum(1 for entry in current.values() if entry.get("sha256"))
     result = {"copied": copied, "skipped": skipped, "removed": removed, "mirrored": done, "openings": len(openings), "outage": outage}
     logger.info("mirror: %s", result)
     return result

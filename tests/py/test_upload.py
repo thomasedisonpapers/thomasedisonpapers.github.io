@@ -498,3 +498,28 @@ def test_a_removed_account_books_remote_files_are_deleted_in_the_same_commit(tmp
     hub = FakeHub(files={"volumes/A100/volume.json": b"{}", "scans/A100/full/0001.jpg": JPEG}, cache=tmp_path / "cache")
     upload.upload(_volumes(_dataset(tmp_path / "data")), "org/repo", hub)
     assert not any(path.startswith(("volumes/A100/", "scans/A100/")) for path in hub.files)
+
+
+def test_an_account_book_manifest_whose_only_change_is_its_date_makes_no_commit(tmp_path):
+    dataset = _volumes(_dataset(tmp_path))
+    hub = FakeHub(cache=tmp_path / "cache")
+    upload.upload(dataset, "org/repo", hub)
+    hub.commits.clear()
+    path = dataset / "volumes" / "manifest.json"
+    path.write_text(json.dumps({**json.loads(path.read_text("utf-8")), "generated_at": "2026-11-23T05:00:00Z"}), "utf-8")
+    upload.upload(dataset, "org/repo", hub)
+    assert hub.commits == []
+
+
+def test_a_scan_file_still_being_written_is_left_out_of_the_release(tmp_path):
+    dataset = _volumes(_dataset(tmp_path))
+    (dataset / "scans" / "A234A" / "full" / "0002.jpg.part").write_bytes(b"half")
+    assert upload.check(dataset) == []
+
+
+def test_an_upload_that_would_remove_most_mirrored_scans_is_refused(tmp_path, monkeypatch):
+    monkeypatch.setattr(upload, "SCAN_REMOVAL_LIMIT", 1)
+    hub = FakeHub(files={f"scans/A234A/full/{n:04d}.jpg": JPEG for n in (1, 2)} | {"scans/A234A/thumb/0002.jpg": JPEG},
+                  cache=tmp_path / "cache")
+    with pytest.raises(upload.UploadError):
+        upload.upload(_volumes(_dataset(tmp_path / "data"), scans=()), "org/repo", hub)

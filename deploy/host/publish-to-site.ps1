@@ -46,9 +46,6 @@ try {
         "--bucket-uri", "file://./data/bucket", "--out", $Dataset)
     $env:PYTHONPATH = $null
     $archivePython = Join-Path $Archive ".venv\Scripts\python.exe"
-    # A few minutes of gentle copying each run, so the account-book scans reach the dataset over a day without crowding the schedule.
-    Invoke-Step "mirroring account-book scans" $archivePython @((Join-Path $Archive "builder\mirror_scans.py"), "--dataset", $Dataset,
-        "--contact", "$SiteUrl/about.html", "--minutes", "8")
     $embed = Join-Path $Archive "builder\embed.py"
     $store = Join-Path $Dataset "embeddings"
     $upload = Join-Path $Archive "builder\upload.py"
@@ -75,6 +72,13 @@ try {
     }
     if (-not $recordsUploaded -or $uploadModel -ne "none") {
         Invoke-Step "uploading" $archivePython @($upload, "--dataset", $Dataset, "--embedding-model", $uploadModel)
+    }
+    # After the upload, so a slow or failing edisondigital never holds up approvals or withdrawals; new scans go up next run.
+    try {
+        Invoke-Step "mirroring account-book scans" $archivePython @((Join-Path $Archive "builder\mirror_scans.py"), "--dataset", $Dataset,
+            "--contact", "$SiteUrl/about.html", "--minutes", "8")
+    } catch {
+        Write-Log "mirroring skipped this run: $_"
     }
     Write-Log "done"
 } catch {
