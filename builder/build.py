@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import html
 import json
 import logging
 import os
@@ -330,11 +331,114 @@ def report_shared_scans(groups: list[dict]) -> None:
 
 def folder_description(records: list[dict]) -> str:
     """A plain account of what the folder holds, for folders the archive has not described."""
+    return f"{len(records)} document{'s' if len(records) != 1 else ''}{_holdings(records)}."
+
+
+def topic_description(title: str, records: list[dict]) -> str:
+    """What a generated topic holds, naming the editors' heading it comes from."""
+    return f"Documents the editors filed under “{title}”{_holdings(records)}."
+
+
+def _holdings(records: list[dict]) -> str:
     years = sorted(y for y in (r.get("year") for r in records) if y)
     span = f", {years[0]}–{years[-1]}" if years and years[0] != years[-1] else (f", {years[0]}" if years else "")
-    kinds = [kind for kind, _ in Counter(r.get("type") for r in records if r.get("type")).most_common(3)]
-    listed = f", mostly {', '.join(k.lower() for k in kinds[:-1])}{' and ' if len(kinds) > 1 else ''}{kinds[-1].lower()}s" if kinds else ""
-    return f"{len(records)} document{'s' if len(records) != 1 else ''}{span}{listed}."
+    # A bracketed type such as "[Unedited]" is a cataloguing state, not a kind of document.
+    kinds = [plural_kind(kind) for kind, _ in Counter(r.get("type") for r in records
+                                                       if r.get("type") and not r["type"].startswith("[")).most_common(3)]
+    listed = f", mostly {', '.join(kinds[:-1])}{' and ' if len(kinds) > 1 else ''}{kinds[-1]}" if kinds else ""
+    return f"{span}{listed}"
+
+
+def plural_kind(kind: str) -> str:
+    """A document type in the plural, as "mostly letters and minutes" reads."""
+    kind = kind.lower()
+    words = kind.split() or [kind]
+    # "Letters to the editor" is plural already, in its first word.
+    if words[-1].endswith("s") or (len(words) > 1 and words[0].endswith("s")):
+        return kind
+    if words[-1].endswith(("x", "ch", "sh")):
+        return kind + "es"
+    last = words[-1]
+    if last.endswith("y") and last[-2:-1] not in "aeiou":
+        return kind[:-1] + "ies"
+    return kind + "s"
+
+
+TOPIC_MIN_DOCUMENTS = 10
+_TOPIC_ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,79}$")
+
+
+def heading_key(text: str) -> tuple[str, ...]:
+    """A subject heading as stemmed words, so capitals, plurals and entities never split one heading in two."""
+    return tuple(textindex.stem(word) for word in textindex.tokenize(html.unescape(text or "")))
+
+
+def _clean_heading(text: str) -> str:
+    return " ".join(html.unescape(text or "").split()).strip()
+
+
+def _names_subject(heading: tuple[str, ...], phrase: tuple[str, ...]) -> bool:
+    return bool(phrase) and any(heading[i:i + len(phrase)] == phrase for i in range(len(heading) - len(phrase) + 1))
+
+
+def _subject_headings(record: dict):
+    split = False
+    for subject in record.get("subjects") or []:
+        text = _clean_heading(subject)
+        # A semicolon in an HTML entity can leave multiple pieces of one heading in the export.
+        continues = subject.rstrip().lower().endswith("&amp")
+        piece, split = split or continues, continues
+        if not piece and (key := heading_key(text)):
+            yield key, text
+
+
+def subject_index(ordered: list[dict]) -> dict[tuple[str, ...], list[int]]:
+    index = defaultdict(list)
+    for ordinal, record in enumerate(ordered):
+        for key in {key for key, _ in _subject_headings(record)}:
+            index[key].append(ordinal)
+    return index
+
+
+def topic_documents(topic: dict, subjects: dict[tuple[str, ...], list[int]], terms_by_doc: list[dict[str, int]],
+                    variants: dict[str, list[str]]) -> list[int]:
+    """The ordinals of a topic's documents: by the editors' subject headings when it names them, else by its words."""
+    if not topic.get("subjects"):
+        return [n for n, terms in enumerate(terms_by_doc) if topic_matches(topic, terms, variants)]
+    phrases = {heading_key(s) for s in topic["subjects"]}
+    if topic.get("generated"):
+        return sorted({n for phrase in phrases for n in subjects.get(phrase, [])})
+    return sorted({n for heading, ordinals in subjects.items() if any(_names_subject(heading, p) for p in phrases)
+                   for n in ordinals})
+
+
+def generated_topics(ordered: list[dict], curated: list[dict], minimum: int | None = None) -> list[dict]:
+    """A topic for every subject heading the editors gave at least `minimum` documents, unless a curated topic names it."""
+    minimum = TOPIC_MIN_DOCUMENTS if minimum is None else minimum
+    taken = {heading_key(s) for topic in curated for s in topic.get("subjects", [])}
+    counts, spellings = Counter(), defaultdict(Counter)
+    for record in ordered:
+        keys = set()
+        for key, text in _subject_headings(record):
+            keys.add(key)
+            spellings[key][text] += 1
+        counts.update(keys)
+    out, ids = [], {topic["id"] for topic in curated if isinstance(topic.get("id"), str)}
+    for key in sorted(counts, key=lambda k: " ".join(k)):
+        if counts[key] < minimum or key in taken:
+            continue
+        title = max(spellings[key].items(), key=lambda item: (item[1], item[0]))[0]
+        slug = re.sub(r"[^a-z0-9]+", "-", textindex.fold(title)).strip("-") or "subject"
+        prefix = f"subject-{slug}"
+        topic_id = prefix[:80].rstrip("-")
+        number = 1
+        while topic_id in ids:
+            number += 1
+            suffix = f"-{number}"
+            topic_id = prefix[:80 - len(suffix)].rstrip("-") + suffix
+        ids.add(topic_id)
+        out.append({"id": topic_id, "title": title, "subjects": [title], "generated": True})
+    return out
 
 
 def topic_matches(topic: dict, terms: dict[str, int], variants: dict[str, list[str]] | None = None) -> bool:
@@ -564,16 +668,28 @@ def build(dataset: Path, web: Path, out: Path, *, allow_shrink: bool = False, da
 
     ordinal_of = {s["id"]: n for n, s in enumerate(summaries)}
     topic_list = []
-    for topic in topics:
-        matched = [n for n, terms in enumerate(terms_by_doc) if topic_matches(topic, terms, variants)]
+    subjects = subject_index(ordered)
+    topic_ids = set()
+    for topic in [*topics, *generated_topics(ordered, topics)]:
+        topic_id = topic.get("id")
+        if not isinstance(topic_id, str) or not _TOPIC_ID.fullmatch(topic_id):
+            raise BuildError(f"invalid topic id {topic_id!r}")
+        if topic_id in topic_ids:
+            raise BuildError(f"duplicate topic id {topic_id!r}")
+        topic_ids.add(topic_id)
+        matched = topic_documents(topic, subjects, terms_by_doc, variants)
         cover = topic.get("cover") if topic.get("cover") in ordinal_of else None
         if cover is None and matched:
             cover = next((summaries[n]["id"] for n in matched if summaries[n]["status"] == "approved" and summaries[n]["thumb"]),
                          summaries[matched[0]]["id"])
         cover_summary = summaries[ordinal_of[cover]] if cover else None
-        topic_list.append({**{k: topic[k] for k in ("id", "title", "description", "any") if k in topic},
-                           "fields": topic.get("fields") or [], "count": len(matched),
+        # Each topic's documents are listed once here, so the topic page shows exactly what its count says.
+        write_json(site_data / "topics" / f"{topic['id']}.json", {"ordinals": matched})
+        topic_list.append({"id": topic["id"], "title": topic["title"],
+                           "description": topic.get("description") or topic_description(topic["title"], [ordered[n] for n in matched]),
+                           "count": len(matched), "featured": not topic.get("generated"),
                            "thumb": cover_summary and cover_summary["thumb"], "thumb_from": cover_summary and cover_summary["thumb_from"]})
+    write_json(site_data / "topics.json", topic_list)
 
     decades = Counter((s["year"] // 10) * 10 for s in summaries if s["year"])
     recent = sorted((r for r in records.values() if r.get("status") == "approved"), key=lambda r: r.get("updated") or "", reverse=True)
@@ -583,7 +699,8 @@ def build(dataset: Path, web: Path, out: Path, *, allow_shrink: bool = False, da
     built_at = datetime.now(timezone.utc).isoformat()
     catalog = {"schema": SCHEMA, "built_at": built_at, "documents": len(summaries), "approved": approved,
                "drafts": sum(1 for s in summaries if s["status"] == "draft"),
-               "folders": folder_list, "topics": topic_list, "decades": dict(sorted(decades.items())),
+               "folders": folder_list, "topics": [t for t in topic_list if t["featured"]], "topic_count": len(topic_list),
+               "decades": dict(sorted(decades.items())),
                "recent": [ordinal_of[r["id"]] for r in recent[:12]], "hero": hero,
                "sources": {"local": len(local), "edisondigital": len(remote)},
                "local_published_at": manifest.get("generated_at", "")}

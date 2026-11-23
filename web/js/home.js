@@ -55,8 +55,8 @@ async function render() {
   </div></section>
 
   <section class="block"><div class="wrap">
-    <div class="block-head"><div><h2>Browse by topic</h2><p>Each topic gathers the documents that mention it, across every collection.</p></div>
-      <a class="see-all" href="topics.html">All topics ${icon("chevron-right")}</a></div>
+    <div class="block-head"><div><h2>Browse by topic</h2><p>Each topic gathers the documents the editors filed under a subject, across every collection.</p></div>
+      <a class="see-all" href="topics.html">All ${data.topic_count || data.topics.length} topics ${icon("chevron-right")}</a></div>
     <div class="topics">${data.topics.slice(0, 8).map((t) => topicCard(t, base)).join("")}</div>
   </div></section>
 

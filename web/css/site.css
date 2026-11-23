@@ -233,6 +233,16 @@ section.block.alt { background: var(--bg-alt); }
 .topic:hover h3 { color: var(--accent); }
 .topic p { margin: 0; color: var(--muted); font-size: 0.9rem; line-height: 1.45; }
 .topic .count { font-size: 0.82rem; color: var(--text-2); font-weight: 500; }
+.section-title { font-size: 1.15rem; margin: 8px 0 18px; }
+.topic-index { padding: 44px 0 72px; }
+.topic-index-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px 20px; margin-bottom: 14px; }
+.topic-index-head .section-title { margin: 0; }
+.topic-find { width: min(100%, 300px); }
+.topic-list { list-style: none; margin: 0; padding: 0; columns: 3 240px; column-gap: 28px; }
+.topic-list li { break-inside: avoid; border-bottom: 1px solid var(--hairline); }
+.topic-list a { display: flex; justify-content: space-between; gap: 12px; padding: 9px 2px; color: var(--text); }
+.topic-list a:hover { color: var(--accent); text-decoration: none; }
+.topic-list .count { color: var(--muted); font-size: 0.86rem; font-variant-numeric: tabular-nums; }
 .timeline { display: grid; grid-template-columns: repeat(auto-fit, minmax(80px, 1fr)); gap: 8px; align-items: end; }
 .decade { display: grid; gap: 8px; color: var(--text); text-align: center; }
 .decade:hover { text-decoration: none; }

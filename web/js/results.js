@@ -43,8 +43,10 @@ function writeState(state, push) {
   if (push) history.pushState(null, "", url); else history.replaceState(null, "", url);
 }
 
-/** Mounts search into `root`; `base` is a fixed query (a topic) that the reader's words narrow. */
-export async function mountResults(root, { base = "", placeholder = "Search the archive" } = {}) {
+/** Mounts search into `root`; `within` is a fixed set of document ordinals (a topic) that the reader's words narrow. */
+export async function mountResults(root, { within = null, placeholder = "Search the archive" } = {}) {
+  const scope = within ? new Set(within) : null;
+  const restrict = (found) => (scope ? { ...found, ordinals: found.ordinals.filter((n) => scope.has(n)) } : found);
   const [data, meta, { dataset }] = await Promise.all([catalog(), indexMeta(), sources()]);
   const facets = await fetchJSON(await dataUrl("facets.json"));
   setStopwords(meta.stopwords);
@@ -99,11 +101,11 @@ export async function mountResults(root, { base = "", placeholder = "Search the 
   const firstYear = years.length ? Math.min(...years) : 1850;
   const lastYear = years.length ? Math.max(...years) : 1950;
   // Search by meaning loads only when used, and is off by default for visitors whose browser asks to save data.
-  const semantic = createSemantic({ dataUrl, vendor: new URL("../vendor/", import.meta.url).href });
+  const semantic = scope ? null : createSemantic({ dataUrl, vendor: new URL("../vendor/", import.meta.url).href });
   const meaningBox = root.querySelector("#meaning");
   const remembered = (() => { try { return localStorage.getItem("edison.meaning"); } catch { return null; } })();
   meaningBox.checked = remembered ? remembered === "1" : !(navigator.connection && navigator.connection.saveData);
-  semantic.available().then((ok) => { root.querySelector("#meaning-switch").hidden = !ok; });
+  semantic?.available().then((ok) => { root.querySelector("#meaning-switch").hidden = !ok; });
   const form = root.querySelector("form");
   const input = root.querySelector("#q");
   const refine = root.querySelector(".refine");
@@ -203,15 +205,13 @@ export async function mountResults(root, { base = "", placeholder = "Search the 
     const rowsEl = root.querySelector("#rows");
     const slow = setTimeout(() => { if (mine === request) countEl.textContent = "Searching…"; }, 300);
     try {
-      // A topic's words are joined to the reader's with AND; the reader's mode applies only to what they typed.
       let own = parseQuery(state.q, state.mode);
-      const fixed = base ? parseQuery(base, "all") : { clauses: [], notes: [] };
-      let query = { ...own, clauses: [...fixed.clauses, ...own.clauses] };
+      let query = own;
       const filters = { yearFrom: state.from || own.yearFrom, yearTo: state.to || own.yearTo,
         types: new Set([...state.types].map((t) => facets.types.indexOf(t)).filter((n) => n >= 0)),
         folders: new Set([...state.folders].map((f) => facets.folders.indexOf(f)).filter((n) => n >= 0)),
         statuses: new Set([...state.statuses].map((s) => facets.statuses.indexOf(s)).filter((n) => n >= 0)) };
-      let result = await runQuery(query, index, meta);
+      let result = restrict(await runQuery(query, index, meta));
       if (mine !== request) return;
       let { kept, counts } = applyFilters(result.ordinals, facets, filters);
       // The query as typed, kept so that meaning matches can take the place of the "most of your words" fallback.
@@ -221,14 +221,13 @@ export async function mountResults(root, { base = "", placeholder = "Search the 
       // No document holds every word: show the ones holding most of them, best first, and say so, as search engines do.
       if (!kept.length && state.mode === "all" && own.clauses.filter((c) => !c.negate).length > 1) {
         const loose = parseQuery(state.q, "any");
-        const looseQuery = { ...loose, clauses: [...fixed.clauses, ...loose.clauses] };
-        const looser = await runQuery(looseQuery, index, meta);
+        const looser = restrict(await runQuery(loose, index, meta));
         if (mine !== request) return;
         const relaxed = applyFilters(looser.ordinals, facets, filters);
         if (relaxed.kept.length) {
           ({ kept, counts } = relaxed);
           result = looser;
-          query = looseQuery;
+          query = loose;
           own = { ...loose, notes: own.notes };
           broadened = true;
         }
@@ -265,7 +264,7 @@ export async function mountResults(root, { base = "", placeholder = "Search the 
       if (reveal) revealResults();
       const status = root.querySelector("#meaning-status");
       status.hidden = true;
-      if (!meaningBox.checked || base || !eligible(own, state.q)) {
+      if (!meaningBox.checked || !semantic || !eligible(own, state.q)) {
         state.page = page;
         return;
       }

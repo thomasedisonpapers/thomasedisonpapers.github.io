@@ -1,18 +1,18 @@
 [
   {"id": "phonograph", "title": "The Phonograph", "description": "Edison's talking machine, its records, dealers and listeners.",
-   "any": ["phonograph", "phonographs", "graphophone", "diamond disc", "records"]},
+   "subjects": ["phonograph", "ediphone", "diamond disc", "disc record", "phonograph records", "records manufacturing", "music"]},
   {"id": "electric-light", "title": "Electric Light & Power", "description": "Lamps, dynamos, central stations and the spread of electric light.",
-   "any": ["electric light", "incandescent", "lamp", "lamps", "dynamo", "electric power"]},
+   "subjects": ["electric light", "electric lighting", "lamp", "lighting", "dynamo", "electric power"]},
   {"id": "motion-pictures", "title": "Motion Pictures", "description": "The kinetoscope, film catalogues and the motion picture business.",
-   "any": ["motion picture", "motion pictures", "kinetoscope", "film", "films"]},
-  {"id": "batteries", "title": "Storage Batteries", "description": "The alkaline storage battery and the vehicles it powered.",
-   "any": ["storage battery", "battery", "batteries"]},
-  {"id": "cement", "title": "Portland Cement", "description": "The Edison Portland Cement Company, its quarries, kilns and accounts.",
-   "any": ["cement", "portland cement", "kiln", "quarry"]},
+   "subjects": ["motion picture", "kinetoscope", "kinetophone", "movie film"]},
+  {"id": "batteries", "title": "Batteries", "description": "The alkaline storage battery, primary cells and the vehicles they powered.",
+   "subjects": ["battery"]},
+  {"id": "cement", "title": "Portland Cement", "description": "The Edison Portland Cement Company, its quarries, kilns and concrete houses.",
+   "subjects": ["cement"]},
   {"id": "family", "title": "Family Letters", "description": "Letters among Thomas Edison, Mina Miller Edison and the Miller family.",
-   "any": ["miller", "mina"], "fields": ["author", "recipient", "names"]},
+   "subjects": ["family"]},
   {"id": "advice", "title": "Advice & Requests", "description": "Letters from the public asking Edison for advice, help or an opinion.",
-   "any": ["advice", "advise", "opinion", "request", "suggestion"]},
+   "subjects": ["advice"]},
   {"id": "business", "title": "Business & Finance", "description": "Statements, accounts, contracts and the business of invention.",
-   "any": ["financial statement", "account", "accounts", "invoice", "contract", "statement"], "fields": ["type", "title", "subjects"]}
+   "subjects": ["financial", "finance", "finances", "stocks bonds", "stockholders", "capital stock", "contracts", "accounting", "business"]}
 ]

@@ -512,3 +512,100 @@ def test_the_browsers_query_model_is_the_hosts_document_model():
     import embed
     assert (build.SEARCH_MODEL["revision"], build.SEARCH_MODEL["query_prefix"]) == (
         embed.MODELS["arctic-embed-s"]["onnx"]["revision"], embed.MODELS["arctic-embed-s"]["query_prefix"])
+
+
+def _filed(*headings_per_document):
+    return [_record(f"D{n}", subjects=list(headings)) for n, headings in enumerate(headings_per_document)]
+
+
+def test_a_subject_heading_on_enough_documents_becomes_a_topic():
+    topics = build.generated_topics(_filed(*[["Radio"]] * 3), [], minimum=3)
+    assert [t["title"] for t in topics] == ["Radio"]
+
+
+def test_a_subject_heading_on_too_few_documents_is_not_a_topic_yet():
+    assert build.generated_topics(_filed(*[["Radio"]] * 2), [], minimum=3) == []
+
+
+def test_capitals_and_plurals_do_not_split_a_heading_into_two_topics():
+    topics = build.generated_topics(_filed(["Incandescent Lamp"], ["incandescent lamps"], ["Incandescent lamp"]), [], minimum=3)
+    assert len(topics) == 1
+
+
+def test_a_heading_a_curated_topic_names_is_not_repeated_as_its_own_topic():
+    curated = [{"id": "radio", "title": "Wireless", "subjects": ["radio"]}]
+    assert build.generated_topics(_filed(*[["Radio"]] * 3), curated, minimum=3) == []
+
+
+def test_fragments_of_a_heading_split_at_an_ampersand_are_not_topics():
+    filed = _filed(*[["Awards &amp", "honors/clubs &amp", "societies"]] * 3)
+    assert build.generated_topics(filed, [], minimum=3) == []
+
+
+def test_a_generated_topic_holds_only_its_exact_heading_not_longer_ones():
+    filed = _filed(["Electric light"], ["Electric light and power"])
+    topic = {"id": "subject-electric-light", "title": "Electric light", "subjects": ["Electric light"], "generated": True}
+    assert build.topic_documents(topic, build.subject_index(filed), [], {}) == [0]
+
+
+def test_a_curated_topic_takes_longer_headings_that_contain_its_words():
+    filed = _filed(["Marine lighting"], ["Moonlighting"], ["Arc lighting"])
+    topic = {"id": "electric-light", "title": "Electric light", "subjects": ["lighting"]}
+    assert build.topic_documents(topic, build.subject_index(filed), [], {}) == [0, 2]
+
+
+def test_a_generated_topic_does_not_include_a_fragment_of_another_heading():
+    filed = _filed(["Societies"], ["Clubs &amp", "societies", "Radio"])
+    topic = {"subjects": ["Societies"], "generated": True}
+    assert build.topic_documents(topic, build.subject_index(filed), [], {}) == [0]
+
+
+def test_long_headings_get_unique_topic_ids_that_fit_the_topic_route():
+    prefix = "Electrical testing of industrial devices using several experiments and materials"
+    filed = _filed([f"{prefix} in France", f"{prefix} in Germany", f"{prefix} in Italy"])
+    curated = [{"id": "subject-electrical-testing-of-industrial-devices-using-several-experiments-and-m"}]
+    topics = build.generated_topics(filed, curated, minimum=1)
+    ids = {topic["id"] for topic in topics if build._TOPIC_ID.fullmatch(topic["id"])}
+    assert len(ids - {curated[0]["id"]}) == 3
+
+
+def test_every_kind_of_document_is_named_in_the_plural():
+    records = [{"type": "Letter"}, {"type": "Letter"}, {"type": "Legal Testimony"}, {"type": "Speech"}]
+    assert build.folder_description(records).endswith("mostly letters, legal testimonies and speeches.")
+
+
+def test_a_bracketed_cataloguing_state_is_not_named_as_a_kind_of_document():
+    assert build.folder_description([{"type": "[Unedited]"}, {"type": "Letter"}]).endswith("mostly letters.")
+
+
+def test_a_topic_page_lists_exactly_the_documents_its_count_says(dataset):
+    _build(dataset)
+    topic = _data(dataset, "topics.json")[0]
+    assert len(_data(dataset, f"topics/{topic['id']}.json")["ordinals"]) == topic["count"]
+
+
+def test_the_catalogue_carries_only_featured_topics_and_the_number_of_all_of_them(dataset, monkeypatch):
+    for n, path in enumerate(sorted((dataset / "dataset" / "local").glob("*/record.json"))):
+        record = json.loads(path.read_text("utf-8"))
+        path.write_text(json.dumps({**record, "subjects": ["Radio"]}), "utf-8")
+    monkeypatch.setattr(build, "TOPIC_MIN_DOCUMENTS", 3)
+    _build(dataset)
+    catalog = _data(dataset, "catalog.json")
+    assert ([t["id"] for t in catalog["topics"]], catalog["topic_count"]) == (["cement"], 2)
+
+
+def test_a_topic_id_that_could_break_a_url_stops_the_build(dataset):
+    (dataset / "web" / "data" / "topics.json").write_text(json.dumps([{"id": "../cement", "title": "Cement", "any": ["cement"]}]), "utf-8")
+    with pytest.raises(build.BuildError):
+        _build(dataset)
+
+
+def test_duplicate_topic_ids_cannot_overwrite_another_topics_membership(dataset):
+    path = dataset / "web" / "data" / "topics.json"
+    path.write_text(json.dumps([{"id": "cement", "title": name, "any": [name]} for name in ("Cement", "Radio")]), "utf-8")
+    with pytest.raises(build.BuildError, match="duplicate topic id"):
+        _build(dataset)
+
+
+def test_a_generated_topic_is_described_by_the_heading_it_comes_from():
+    assert build.topic_description("Radio", [{"type": "Letter", "year": 1920}]) == "Documents the editors filed under “Radio”, 1920, mostly letters."
