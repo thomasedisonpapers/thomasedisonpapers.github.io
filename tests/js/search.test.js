@@ -123,6 +123,8 @@ const SHARDS = {
   [shardOf("storag batteri")]: { "storag batteri": [1, 1] },
   bat: { batteri: [1, 1, 1, 512] },
   lab: { laboratori: [2, 512], lab: [0, 1] },
+  us_: { us: [0, 1] },
+  usa: { usag: [1, 512] },
   [shardOf("edison laboratori")]: { "edison laboratori": [1, 512] },
 };
 const META = { documents: 3, weights: { title: 8, text: 1 } };
@@ -146,6 +148,16 @@ test("a phrase needs its word pair", async () => {
 test("a word beginning finds every word that starts with it", async () => {
   const result = await runQuery(parseQuery("batter*"), index(), META);
   assert.deepEqual(result.ordinals.sort(), [1, 2]);
+});
+
+test("a wildcard keeps an exact stem indexed outside the typed prefix's shard", async () => {
+  const result = await runQuery(parseQuery("using*"), index(), META);
+  assert.deepEqual(result.ordinals, [0]);
+});
+
+test("any-word search keeps an exact stem indexed outside the typed prefix's shard", async () => {
+  const result = await runQuery(parseQuery("using battery", "any"), index(), META);
+  assert.deepEqual(result.ordinals.sort(), [0, 1, 2]);
 });
 
 test("an excluded word removes its documents", async () => {
@@ -184,6 +196,10 @@ test("sorting by DocID follows the id ranks", () => {
 
 test("highlighting escapes the text around a match", () => {
   assert.equal(highlight("<b>Edison</b>", parseQuery("edison"), esc), "&lt;b&gt;<mark>Edison</mark>&lt;/b&gt;");
+});
+
+test("highlighting marks a word found by the wildcard's exact stem", () => {
+  assert.equal(highlight("We used the battery.", parseQuery("using*"), esc), "We <mark>used</mark> the battery.");
 });
 
 test("highlighting never marks inside an escaped character (regression: AT&T read as AT&<mark>amp</mark>;T, 20 November)", () => {

@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { parseQuery } from "../../web/js/search.js";
-import { eligible, fuse, keywordWeight, meaningCutoff, meaningText, scorePassages, topMatches } from "../../web/js/semantic.js";
+import { eligible, fuse, keywordWeight, meaningCutoff, meaningScope, meaningText, scorePassages, topMatches } from "../../web/js/semantic.js";
 
 const ask = (text, mode = "all") => eligible(parseQuery(text, mode), text);
 
@@ -28,6 +28,14 @@ test("a field search is left to keyword search", () => {
 
 test("an exclusion is left to keyword search", () => {
   assert.equal(ask("aviation -helicopter"), false);
+});
+
+test("Boolean operators are left to keyword search", () => {
+  assert.deepEqual([ask("battery AND storage"), ask("battery OR storage"), ask("battery and storage")], [false, false, true]);
+});
+
+test("an explicit wildcard is left to keyword search", () => {
+  assert.equal(ask("batter* storage"), false);
 });
 
 test("exact phrase mode is left to keyword search", () => {
@@ -75,6 +83,20 @@ test("the shortlist limit leaves room for matches inside the selected collection
 test("a filter cannot lower the archive-wide cutoff and admit weaker matches", () => {
   const scores = archive([[1, 0.86], ...Array.from({ length: 15 }, (_, n) => [n + 2, 0.58])], 0.25);
   assert.deepEqual(topMatches(scores, { allowed: new Set(Array.from({ length: 15 }, (_, n) => n + 2)) }), []);
+});
+
+test("meaning matches in another collection preserve the keyword fallback in the selected collection", () => {
+  const facets = { folder: [0, 1], year: [1920, 1921], type: [0, 0], status: [0, 0] };
+  const filters = { folders: new Set([0]), types: new Set(), statuses: new Set() };
+  const { matches, counts } = meaningScope([1], [], [0], facets, filters);
+  assert.deepEqual([matches, counts.folder], [[], new Map([[0, 1], [1, 1]])]);
+});
+
+test("the fallback keeps collections containing strict keyword matches available", () => {
+  const facets = { folder: [0, 1, 2], year: [1920, 1921, 1922], type: [0, 0, 0], status: [0, 0, 0] };
+  const filters = { folders: new Set([0]), types: new Set(), statuses: new Set() };
+  const { counts } = meaningScope([1], [2], [0], facets, filters);
+  assert.equal(counts.folder.get(2), 1);
 });
 
 test("a document found both ways outranks one found only one way", () => {

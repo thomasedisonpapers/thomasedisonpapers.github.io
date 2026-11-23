@@ -1,11 +1,13 @@
 // Search by meaning: the query becomes a vector in a worker, is compared with every published passage, and is merged with keyword results.
 import { fetchJSON } from "./core.js";
+import { applyFilters } from "./search.js";
 
-/** Whether a query is plain words worth matching by meaning; exact phrases, quotes, fields, IDs and exclusions stay keyword-only. */
+/** Whether a query is plain words worth matching by meaning; explicit search syntax stays keyword-only. */
 export function eligible(query, text) {
-  if (!query || query.mode === "exact" || /"/.test(String(text || ""))) return false;
-  if (query.clauses.some((clause) => clause.negate || clause.alts.some((atom) => atom && atom.field))) return false;
-  return (meaningText(text).match(/\p{L}{3,}/gu) || []).length >= 2;
+  const words = meaningText(text);
+  if (!query || query.mode === "exact" || /"/.test(String(text || "")) || /(?:^|\s)(?:AND|OR|NOT)(?=\s|$)/.test(words)) return false;
+  if (query.clauses.some((clause) => clause.negate || clause.alts.some((atom) => atom?.field || atom?.raw?.endsWith("*")))) return false;
+  return (words.match(/\p{L}{3,}/gu) || []).length >= 2;
 }
 
 /** The reader's words without year ranges, which are already applied as a filter. */
@@ -52,6 +54,17 @@ export function topMatches(best, { limit = 40, allowed = null, cutoff, ...option
     .filter(([ordinal, score]) => score >= threshold && (!allowed || allowed.has(ordinal)))
     .sort((a, b) => b[1] - a[1])
     .slice(0, limit).map(([ordinal]) => ordinal);
+}
+
+export function meaningScope(closest, strict, fallback, facets, filters) {
+  const candidates = new Set([...strict, ...closest]);
+  const matching = applyFilters(candidates, facets, filters);
+  const allowed = new Set(matching.kept);
+  const matches = closest.filter((ordinal) => allowed.has(ordinal));
+  if (!fallback || matches.length) return { matches, counts: matching.counts };
+  // The fallback can use different keyword expansions, so keep strict matches available through other facets.
+  for (const ordinal of fallback) candidates.add(ordinal);
+  return { matches, counts: applyFilters(candidates, facets, filters).counts };
 }
 
 export function keywordWeight(similarity, cutoff) {

@@ -1,7 +1,7 @@
 // The search experience shared by the search page and topic pages: query, refine sidebar, results, views and paging.
 import { catalog, dataUrl, esc, fetchJSON, icon, indexMeta, plural, sources, statusHelp, summaries, wireHelp, STATUS } from "./core.js";
 import { documentEntry } from "./cards.js";
-import { createSemantic, eligible, fuse, keywordWeight, meaningCutoff, meaningText, topMatches } from "./semantic.js";
+import { createSemantic, eligible, fuse, keywordWeight, meaningCutoff, meaningScope, meaningText, topMatches } from "./semantic.js";
 import { enhanceSelect, rangeSlider } from "./controls.js";
 import { Index, applyFilters, describeQuery, highlight, maskFields, parseQuery, runQuery, setStopwords, setVariants, sortResults, suggest, yearBounds } from "./search.js";
 
@@ -222,7 +222,8 @@ export async function mountResults(root, { within = null, placeholder = "Search 
         const loose = parseQuery(state.q, "any");
         const looser = restrict(await runQuery(loose, index, meta));
         if (mine !== request) return;
-        const relaxed = applyFilters(looser.ordinals, facets, filters);
+        // Strict matches outside the selected filters still matter to the sidebar.
+        const relaxed = applyFilters(new Set([...result.ordinals, ...looser.ordinals]), facets, filters);
         if (relaxed.kept.length) {
           ({ kept, counts } = relaxed);
           result = looser;
@@ -278,16 +279,18 @@ export async function mountResults(root, { within = null, placeholder = "Search 
         if (mine !== request) return;
         const cutoff = meaningCutoff(best);
         const closest = topMatches(best, { cutoff, limit: Infinity });
-        if (closest.length || (broadened && strict.result.ordinals.length)) {
+        if (closest.length) {
+          // Count every qualifying match, but keep the keyword fallback when all meaning matches are filtered out.
+          const { matches: inScope, counts: facetCounts } = meaningScope(closest, strict.result.ordinals,
+            broadened ? result.ordinals : null, facets, filters);
+          if (!inScope.length) {
+            renderRefine(facetCounts, filters);
+            return;
+          }
           if (broadened) {
             ({ result, kept, query, own } = strict);
             broadened = false;
           }
-          // Count all qualifying matches so the result cap cannot disable a filter.
-          const candidates = new Set([...result.ordinals, ...closest]);
-          const { kept: matching, counts: facetCounts } = applyFilters(candidates, facets, filters);
-          const allowed = new Set(matching);
-          const inScope = closest.filter((ordinal) => allowed.has(ordinal));
           meaningOnly = !kept.length && inScope.length > 0;
           const found = new Set(kept);
           // Cap semantic additions after filtering, so overlapping keyword matches never consume their slots.

@@ -198,9 +198,14 @@ export class Index {
   async atom(atom) {
     if (atom.kind === "term") return this.term(atom.field === "id" ? atom.words[0] : stem(atom.words[0]), atom.mask);
     if (atom.kind === "prefix") {
-      const out = new Map();
-      const begins = [atom.words[0], stem(atom.words[0])];
-      for (const [term, list] of Object.entries(await this.shard(shardOf(atom.words[0])))) {
+      const [word] = atom.words;
+      const normalized = stem(word);
+      const shard = shardOf(word);
+      const begins = [word, normalized];
+      // Stemming can move the word to another shard, so also look up the exact stem there.
+      const [terms, out] = await Promise.all([this.shard(shard),
+        shardOf(normalized) === shard ? new Map() : this.term(normalized, atom.mask)]);
+      for (const [term, list] of Object.entries(terms)) {
         if (term.includes(" ") || !begins.some((b) => term.startsWith(b))) continue;
         for (const [doc, mask] of decode(list, atom.mask)) out.set(doc, (out.get(doc) || 0) | mask);
       }
@@ -336,7 +341,8 @@ export function highlight(text, query, escapeHtml) {
     for (const atom of clause.alts) {
       for (const word of atom.words || []) {
         if (STOPWORDS.has(word) || word.length < 2) continue;
-        if (atom.kind === "prefix") prefixes.push(word); else wanted.add(stem(word));
+        if (atom.kind === "prefix") prefixes.push(word);
+        wanted.add(stem(word));
       }
     }
   }
