@@ -656,3 +656,22 @@ upload, build, reader); what differs:
 - **Scale:** the build holds 88,087 entries in about 1 min 40 s; Pages data is about 150 MB (index 104 MB). Summaries are
   written 200 to a file, so a results page scattered across the years downloads a few hundred kilobytes.
 - **Next:** the split vector layout for search by meaning, then the notebook passages encoded on Amarel.
+
+## Search by meaning in clusters (24 November)
+
+Notebooks add about 150,000 passages, which would have made the single vector file about 75 MB.
+
+- **Layout:** above 20,000 passages the builder writes `vectors/centroids.i8` (each cluster's mean, as signed bytes) and
+  one `vectors/clusters/{n}.bin` per cluster (its vectors, then each one's document ordinal). Clusters come from
+  spherical k-means with a fixed seed (about 200 passages each, 20 rounds), so unchanged vectors give unchanged files.
+- **Search:** the browser scores the centres, reads the nearest clusters until they hold `probe.vectors` passages, and
+  keeps each cluster once read. With active filters it can also probe up to the same budget in clusters that contain
+  matching documents, using a compact list of their ordinals. The cutoff's "typical document" comes from every centre's mean similarity weighted by
+  size, because only the nearest clusters are scored (on real queries it was within 0.015 of the true median).
+- **Measured on 50,653 passages and 25 real queries:** reading 16,000 passages (6.3 MB) found 91% of the single file's
+  top 40; 10,000 (3.9 MB) found 82%. Storing each passage in two clusters did not help at the same download.
+  `PROBE_VECTORS` is retuned on the full ~200,000 once the notebooks are encoded.
+- **Notebook encoding:** planned on the laptop against the published records and the live store, so only the 150,531
+  new notebook passages were encoded, on Amarel (job 64362128). `embed.py plan --collections accounts,notebooks` names
+  them; the host's publish script switches to it in the same gap between runs that its store receives the vectors,
+  because `collect` deletes unplanned finished vectors and the host would otherwise encode them on its CPU.

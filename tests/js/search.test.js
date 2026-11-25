@@ -82,6 +82,10 @@ test("a leading minus excludes a word", () => {
   assert.equal(parseQuery("-cement").clauses[0].negate, true);
 });
 
+test("NOT does not exclude the next searchable word after an ignored stopword", () => {
+  assert.equal(describeQuery(parseQuery("battery NOT the storage")), 'Documents with "battery" and "storage".');
+});
+
 test("a trailing star searches word beginnings", () => {
   assert.equal(parseQuery("batter*").clauses[0].alts[0].kind, "prefix");
 });

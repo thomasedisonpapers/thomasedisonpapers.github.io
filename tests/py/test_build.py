@@ -791,3 +791,71 @@ def test_a_public_dataset_with_only_notebooks_can_be_built(dataset):
     _notebook(dataset)
     (dataset / "dataset" / "local" / "manifest.json").write_text('{"folders": {}}', "utf-8")
     assert _build(dataset, dataset_url="https://example.org/dataset/")["documents"] == 1
+
+
+def _unit_rows(n, dim=8, seed=1):
+    import numpy as np
+    rows = np.random.default_rng(seed).normal(size=(n, dim)).astype(np.float32)
+    return rows / np.linalg.norm(rows, axis=1, keepdims=True)
+
+
+def test_clustering_the_same_vectors_twice_gives_the_same_clusters():
+    matrix = _unit_rows(120)
+    assert (build.cluster_vectors(matrix, size=20)[0] == build.cluster_vectors(matrix, size=20)[0]).all()
+
+
+def test_each_passage_belongs_to_exactly_one_cluster_of_about_the_chosen_size():
+    import numpy as np
+    assign, means = build.cluster_vectors(_unit_rows(120), size=20)
+    assert (len(means), int(np.bincount(assign, minlength=len(means)).sum())) == (6, 120)
+
+
+def test_a_cluster_centre_is_its_passages_average_so_its_score_is_their_average_similarity():
+    import numpy as np
+    matrix = _unit_rows(60)
+    assign, means = build.cluster_vectors(matrix, size=20)
+    assert np.allclose(means[0], matrix[assign == 0].mean(axis=0), atol=1e-5)
+
+
+def test_a_large_vector_store_is_split_into_clusters_with_their_centres(dataset, monkeypatch):
+    monkeypatch.setattr(build, "VECTOR_FLAT_LIMIT", 1)
+    monkeypatch.setattr(build, "CLUSTER_SIZE", 1)
+    _store(dataset)
+    _build(dataset)
+    meta = _vector_meta(dataset)
+    assert (meta["layout"], sum(meta["clusters"]), meta["files"]["centroids"]) == ("ivf", 2, "centroids.i8")
+
+
+def test_each_cluster_file_holds_its_vectors_then_their_document_ordinals(dataset, monkeypatch):
+    monkeypatch.setattr(build, "VECTOR_FLAT_LIMIT", 1)
+    monkeypatch.setattr(build, "CLUSTER_SIZE", 1)
+    _store(dataset)
+    _build(dataset)
+    revision = json.loads((dataset / "site" / "data" / "current.json").read_text("utf-8"))["revision"]
+    folder = dataset / "site" / "data" / revision / "vectors" / "clusters"
+    meta = _vector_meta(dataset)
+    assert [(folder / f"{n:05d}.bin").stat().st_size for n in range(len(meta["clusters"]))] == [c * (384 + 4) for c in meta["clusters"]]
+
+
+def test_the_cluster_ordinal_index_lists_each_clusters_passage_owners_in_order(dataset, monkeypatch):
+    monkeypatch.setattr(build, "VECTOR_FLAT_LIMIT", 1)
+    monkeypatch.setattr(build, "CLUSTER_SIZE", 1)
+    _store(dataset)
+    _build(dataset)
+    site_data = dataset / "site" / "data"
+    root = site_data / json.loads((site_data / "current.json").read_text("utf-8"))["revision"] / "vectors"
+    meta = _vector_meta(dataset)
+    packed = [(root / "clusters" / f"{n:05d}.bin").read_bytes()[count * meta["dim"]:]
+              for n, count in enumerate(meta["clusters"])]
+    assert (root / meta["files"]["ordinals"]).read_bytes() == b"".join(packed)
+
+
+def test_cluster_centres_are_stored_as_directions_with_their_lengths_beside_them(dataset, monkeypatch):
+    import numpy as np
+    monkeypatch.setattr(build, "VECTOR_FLAT_LIMIT", 1)
+    monkeypatch.setattr(build, "CLUSTER_SIZE", 2)
+    _store(dataset)
+    _build(dataset)
+    revision = json.loads((dataset / "site" / "data" / "current.json").read_text("utf-8"))["revision"]
+    centre = np.frombuffer((dataset / "site" / "data" / revision / "vectors" / "centroids.i8").read_bytes(), dtype=np.int8)
+    assert (int(centre[0]), _vector_meta(dataset)["centre_norms"]) == (127, [1.0])

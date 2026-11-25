@@ -275,7 +275,9 @@ export async function mountResults(root, { within = null, placeholder = "Search 
         status.hidden = false;
       }, 400);
       try {
-        const best = await semantic.search(meaningText(state.q));
+        const narrowed = filters.yearFrom || filters.yearTo || filters.types.size || filters.folders.size || filters.statuses.size;
+        const allowed = narrowed ? new Set(applyFilters(facets.year.keys(), facets, filters).kept) : null;
+        const best = await semantic.search(meaningText(state.q), allowed);
         if (mine !== request) return;
         const cutoff = meaningCutoff(best);
         const closest = topMatches(best, { cutoff, limit: Infinity });

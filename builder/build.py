@@ -323,15 +323,85 @@ def write_vectors(dataset: Path, target: Path, records: dict, ordinal_of_id: dic
                     owners.append(ordinal)
     if not rows:
         return 0
-    matrix = np.concatenate(blocks).astype(np.float32)
+    matrix = np.concatenate(blocks)[rows].astype(np.float32)
     target.mkdir(parents=True, exist_ok=True)
-    # Unit vectors fit in a signed byte at a scale of 127, a quarter the size of 32-bit floats with no change to the ranking that matters.
-    (target / "vectors.i8").write_bytes(np.clip(np.rint(matrix[rows] * 127), -127, 127).astype(np.int8).tobytes())
-    (target / "ordinals.u32").write_bytes(np.asarray(owners, dtype="<u4").tobytes())
-    write_json(target / "meta.json", {**{k: SEARCH_MODEL[k] for k in ("hf", "revision", "dtype", "dim", "query_prefix")},
-                                      "model": SEARCH_MODEL["name"], "count": len(rows), "scale": 127, "layout": "flat",
-                                      "files": {"vectors": "vectors.i8", "ordinals": "ordinals.u32"}})
+    base = {**{k: SEARCH_MODEL[k] for k in ("hf", "revision", "dtype", "dim", "query_prefix")},
+            "model": SEARCH_MODEL["name"], "count": len(rows), "scale": 127}
+    owners = np.asarray(owners, dtype="<u4")
+    if len(rows) <= VECTOR_FLAT_LIMIT:
+        # Unit vectors fit in a signed byte at a scale of 127, a quarter the size of 32-bit floats with no change to the ranking that matters.
+        (target / "vectors.i8").write_bytes(_bytes_of(matrix))
+        (target / "ordinals.u32").write_bytes(owners.tobytes())
+        write_json(target / "meta.json", {**base, "layout": "flat", "files": {"vectors": "vectors.i8", "ordinals": "ordinals.u32"}})
+        return len(rows)
+    assign, means = cluster_vectors(matrix, size=CLUSTER_SIZE)
+    # Clusters are chosen by their centre's direction (on all 201,184 passages this found 87% of the top 40 for 6 MB,
+    # against 82% by average similarity); each centre's length turns that back into the average for the cutoff.
+    norms = np.linalg.norm(means, axis=1)
+    (target / "centroids.i8").write_bytes(_bytes_of(means / np.maximum(norms, 1e-9)[:, None]))
+    counts = []
+    cluster_owners = []
+    for cluster in range(len(means)):
+        members = np.flatnonzero(assign == cluster)
+        counts.append(len(members))
+        # One file per cluster: its passages' vectors, then the document ordinal of each, so one request brings both.
+        path = target / "clusters" / f"{cluster:05d}.bin"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        ordinals = owners[members].tobytes()
+        path.write_bytes(_bytes_of(matrix[members]) + ordinals)
+        cluster_owners.append(ordinals)
+    # A filtered search needs to know which clusters contain its documents before it downloads their vectors.
+    (target / "cluster-ordinals.u32").write_bytes(b"".join(cluster_owners))
+    write_json(target / "meta.json", {**base, "layout": "ivf", "clusters": counts, "probe": {"vectors": PROBE_VECTORS},
+                                      "centre_norms": [round(float(n), 4) for n in norms],
+                                      "files": {"centroids": "centroids.i8", "clusters": "clusters/", "ordinals": "cluster-ordinals.u32"}})
     return len(rows)
+
+
+# Above this many passages, one file of every vector is too much to download, so they are split into clusters.
+VECTOR_FLAT_LIMIT = 20_000
+# About 200 passages a cluster, and the clusters nearest a query until this many passages are read: on 24 November, with
+# every notebook encoded (201,184 passages), this found 85% of the single file's top 10 and 87% of its top 40 for 6 MB.
+CLUSTER_SIZE = 200
+PROBE_VECTORS = 16_000
+
+
+def _bytes_of(vectors) -> bytes:
+    import numpy as np
+
+    return np.clip(np.rint(vectors * 127), -127, 127).astype(np.int8).tobytes()
+
+
+def cluster_vectors(matrix, *, size: int = CLUSTER_SIZE, iterations: int = 20, seed: int = 0):
+    """Spherical k-means with a fixed seed, so an unchanged set of vectors always gives the same files: each row's cluster and each cluster's mean."""
+    import numpy as np
+
+    k = max(1, round(len(matrix) / size))
+    rng = np.random.default_rng(seed)
+    centres = matrix[rng.choice(len(matrix), k, replace=False)].copy()
+
+    def nearest(centres):
+        return np.concatenate([np.argmax(matrix[s:s + 16384] @ centres.T, axis=1) for s in range(0, len(matrix), 16384)])
+
+    def cluster_means(assign):
+        sums = np.zeros_like(centres)
+        np.add.at(sums, assign, matrix)
+        counts = np.bincount(assign, minlength=k)
+        return sums / np.maximum(counts, 1).astype(np.float32)[:, None], counts
+
+    for _ in range(iterations):
+        assign = nearest(centres)
+        means, counts = cluster_means(assign)
+        norms = np.maximum(np.linalg.norm(means, axis=1), 1e-9)
+        occupied = counts > 0
+        updated = means / norms[:, None]
+        if np.array_equal(centres[occupied], updated[occupied]):
+            break
+        centres[occupied] = updated[occupied]
+    assign = nearest(centres)
+    # The stored centre is the plain mean, whose dot product with a query is its cluster's average similarity.
+    means, _ = cluster_means(assign)
+    return assign, means
 
 
 def load_edisondigital(dataset: Path) -> dict:

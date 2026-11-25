@@ -37,7 +37,9 @@ MODELS = {
 CHUNK_PASSAGES = 4096
 
 
-MEANING_COLLECTIONS = {"accounts"}
+# The bound-volume collections searched by meaning unless a plan names others; notebooks join once their vectors are in.
+MEANING_COLLECTIONS = frozenset({"accounts"})
+VOLUME_COLLECTIONS = frozenset({"accounts", "notebooks"})
 
 
 class EmbedError(Exception):
@@ -53,7 +55,7 @@ def in_scope(record: dict, scope: str) -> bool:
     return True
 
 
-def wanted(dataset: Path, scope: str) -> dict[str, list[tuple[str, str]]]:
+def wanted(dataset: Path, scope: str, collections=MEANING_COLLECTIONS) -> dict[str, list[tuple[str, str]]]:
     """Each in-scope document's passages as (key, text), read from the same merged public records the site is built from."""
     local, manifest = build.load_local(dataset)
     remote = build.load_edisondigital(dataset)
@@ -61,7 +63,7 @@ def wanted(dataset: Path, scope: str) -> dict[str, list[tuple[str, str]]]:
     for document_id in manifest.get("withdrawn", []):
         records.pop(document_id, None)
     # Notebooks wait for the split vector layout: their passages would quadruple the single file every visitor downloads.
-    volumes = build.load_volumes(dataset, collections=MEANING_COLLECTIONS)
+    volumes = build.load_volumes(dataset, collections=set(collections))
     build.add_openings(records, build.opening_records(volumes))
     planned = {}
     for document_id, record in sorted(records.items()):
@@ -119,17 +121,20 @@ def stored_keys(root: Path) -> set[str]:
     return keys
 
 
-def plan(dataset: Path, store: Path, model: str, *, scope: str = "approved", chunk: int = CHUNK_PASSAGES) -> dict:
+def plan(dataset: Path, store: Path, model: str, *, scope: str = "approved", chunk: int = CHUNK_PASSAGES,
+         collections=MEANING_COLLECTIONS) -> dict:
     """Writes the passages not yet encoded as job-sized chunks, and the document list that `collect` will make current."""
     if model not in MODELS:
         raise EmbedError(f"unknown model {model!r}; choose from {', '.join(MODELS)}")
     root = store / model
     with FileLock(root / ".plan-collect.lock"):
-        return _plan(dataset, root, model, scope, chunk)
+        return _plan(dataset, root, model, scope, chunk, collections)
 
 
-def _plan(dataset: Path, root: Path, model: str, scope: str, chunk: int) -> dict:
-    documents = wanted(dataset, scope)
+def _plan(dataset: Path, root: Path, model: str, scope: str, chunk: int, collections=MEANING_COLLECTIONS) -> dict:
+    if set(collections) - VOLUME_COLLECTIONS:
+        raise EmbedError(f"unknown collections: {sorted(set(collections) - VOLUME_COLLECTIONS)}")
+    documents = wanted(dataset, scope, collections)
     have = stored_keys(root)
     todo, seen = [], set()
     for pairs in documents.values():
@@ -419,6 +424,8 @@ def main(argv=None) -> int:
     parser.add_argument("--model", choices=sorted(MODELS), required=True)
     parser.add_argument("--dataset", type=Path, help="needed by plan")
     parser.add_argument("--scope", choices=["approved", "transcribed", "all"], default="approved")
+    parser.add_argument("--collections", default=",".join(sorted(MEANING_COLLECTIONS)),
+                        help="Bound-volume collections to include, comma-separated (accounts, notebooks)")
     parser.add_argument("--chunk", type=int, help="encode only this chunk number (a Slurm array index)")
     parser.add_argument("--batch", type=int, default=64)
     parser.add_argument("--backend", choices=["torch", "onnx"], default="torch",
@@ -438,7 +445,8 @@ def main(argv=None) -> int:
 
     try:
         if args.step == "plan":
-            print(json.dumps(plan(args.dataset, args.store, args.model, scope=args.scope)))
+            print(json.dumps(plan(args.dataset, args.store, args.model, scope=args.scope,
+                                  collections={c.strip() for c in args.collections.split(",") if c.strip()})))
         elif args.step == "encode":
             print(encode_chunks(args.store, args.model, encode, only=args.chunk))
         elif args.step == "collect":

@@ -91,21 +91,22 @@ export function parseQuery(input, mode = "all") {
   let match;
   let joinNext = false;
   let explicitAnd = false;
+  let pendingNot = false;
   while ((match = pattern.exec(text))) {
     const [, minus, rawField, quoted, bare] = match;
     const keyword = quoted === undefined && !rawField && !minus ? bare : null;
     if (keyword === "OR") { joinNext = query.clauses.length > 0; continue; }
     if (keyword === "AND") { explicitAnd = true; continue; }
-    if (keyword === "NOT") { query.pendingNot = true; continue; }
+    if (keyword === "NOT") { pendingNot = true; continue; }
+    const negate = minus === "-" || pendingNot;
+    pendingNot = false;
     let field = null;
     let value = quoted ?? bare;
     if (rawField) {
       const key = rawField.toLowerCase();
       if (key === "year" || key === "date") {
         const years = String(value).match(/^(\d{4})(?:\s*(?:\.\.|-|–|to)\s*(\d{4}))?$/);
-        const excluded = minus === "-" || query.pendingNot;
-        query.pendingNot = false;
-        if (years && excluded) {
+        if (years && negate) {
           query.notes.push(`Leaving out a year is not supported, so "${minus}${rawField}:${value}" was ignored.`);
         } else if (years) {
           query.yearFrom = Number(years[1]);
@@ -129,8 +130,6 @@ export function parseQuery(input, mode = "all") {
     const extra = variants.map((v) => atomFor(quoted !== undefined || v.includes(" ") ? v : v, field, { phrase: v.includes(" ") }))
       .filter((a) => a && !a.skipped);
     if (extra.length) atom.variants = extra.map((a) => a.words.join(" "));
-    const negate = minus === "-" || Boolean(query.pendingNot);
-    query.pendingNot = false;
     // In "any word" mode words join one OR group, unless the reader wrote AND between them.
     if ((joinNext || (mode === "any" && !explicitAnd)) && query.clauses.length && !negate) {
       const last = query.clauses[query.clauses.length - 1];
@@ -140,7 +139,6 @@ export function parseQuery(input, mode = "all") {
     explicitAnd = false;
     query.clauses.push({ alts: [atom, ...extra], negate });
   }
-  delete query.pendingNot;
   return query;
 }
 

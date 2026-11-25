@@ -363,3 +363,19 @@ def test_embedding_planning_does_not_open_notebook_files_identified_by_the_manif
     manifest = dataset / "volumes" / "manifest.json"
     manifest.write_text(json.dumps({"volumes": {"A234A": {"collection": "accounts"}, "N149": {"collection": "notebooks"}}}), "utf-8")
     assert set(embed.wanted(dataset, "transcribed")) == {"A234A-0000", "E2002AAA"}
+
+
+def test_a_plan_that_names_the_notebooks_includes_their_scans(tmp_path):
+    dataset = _with_account_book(_dataset(tmp_path, [_record("E2002AAA")]))
+    volume = {"id": "N149", "collection": "notebooks", "title": "N-80-10-15.2 (1880)", "openings": [
+        {"n": 1, "id": "N149-0000", "status": "draft", "source": "", "pages": [{"lines": ["Experiment with carbon filament"]}]}]}
+    (dataset / "volumes" / "N149").mkdir(parents=True)
+    (dataset / "volumes" / "N149" / "volume.json").write_text(json.dumps(volume), "utf-8")
+    (dataset / "volumes" / "manifest.json").write_text(json.dumps({"volumes": {"A234A": {}, "N149": {}}, "withdrawn": []}), "utf-8")
+    assert "N149-0000" in embed.wanted(dataset, "transcribed", {"accounts", "notebooks"})
+
+
+def test_a_plan_naming_an_unknown_collection_is_refused(tmp_path):
+    dataset = _with_account_book(_dataset(tmp_path, [_record("E2002AAA")]))
+    with pytest.raises(embed.EmbedError):
+        embed.plan(dataset, tmp_path / "store", "arctic-embed-s", collections={"letters"})

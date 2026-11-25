@@ -54,7 +54,7 @@ try {
     $recordsUploaded = $false
     try {
         Invoke-Step "planning embeddings" $archivePython @($embed, "plan", "--dataset", $Dataset, "--store", $store,
-            "--model", "arctic-embed-s", "--scope", "transcribed")
+            "--model", "arctic-embed-s", "--scope", "transcribed", "--collections", "accounts,notebooks")
         $todo = Join-Path $store "arctic-embed-s\todo"
         if (Test-Path -LiteralPath (Join-Path $todo "chunk-00001.jsonl") -PathType Leaf) {
             # A large backfill can outlast the publish interval, so make the records visible before encoding.
