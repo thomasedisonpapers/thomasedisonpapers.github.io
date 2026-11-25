@@ -49,6 +49,8 @@ try {
     $embed = Join-Path $Archive "builder\embed.py"
     $store = Join-Path $Dataset "embeddings"
     $upload = Join-Path $Archive "builder\upload.py"
+    $mirror = Join-Path $Archive "builder\mirror_scans.py"
+    Invoke-Step "reconciling cached scans before upload" $archivePython @($mirror, "--dataset", $Dataset, "--prune-only")
     # Publish records independently if embedding fails so withdrawals never wait for the model.
     $uploadModel = "arctic-embed-s"
     $recordsUploaded = $false
@@ -75,7 +77,7 @@ try {
     }
     # After the upload, so a slow or failing edisondigital never holds up approvals or withdrawals; new scans go up next run.
     try {
-        Invoke-Step "mirroring account-book scans" $archivePython @((Join-Path $Archive "builder\mirror_scans.py"), "--dataset", $Dataset,
+        Invoke-Step "mirroring account-book scans" $archivePython @($mirror, "--dataset", $Dataset,
             "--contact", "$SiteUrl/about.html", "--minutes", "8")
     } catch {
         Write-Log "mirroring skipped this run: $_"

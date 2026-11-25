@@ -176,20 +176,14 @@ def _is_jpeg(path: Path) -> bool:
         return file.read(2) == b"\xff\xd8"
 
 
-def mirror(dataset: Path, fetcher: Fetcher, *, minutes: float = 10, limit: int | None = None, clock=time.monotonic,
-           now=time.time) -> dict:
-    """Mirrors scans not yet copied (or whose source changed) until the time or count budget is spent, saving progress as it goes."""
+def _reconcile(dataset: Path, openings: list[tuple[str, int, str]], now) -> tuple[dict, list[tuple[str, int, str]], int]:
+    """Drops obsolete cache files locally and lists scans still needed from their current sources."""
     state_path = dataset / STATE
     try:
         state = json.loads(state_path.read_text("utf-8")) if state_path.exists() else {}
     except ValueError:
         state = {}
-    if not (dataset / "volumes" / "manifest.json").exists():
-        return {"copied": 0, "skipped": 0, "removed": 0, "mirrored": 0, "openings": 0, "outage": ""}
-    openings = published_openings(dataset)
     removed = remove_unpublished(dataset, openings)
-    deadline = clock() + minutes * 60
-    copied, skipped, outage = 0, 0, ""
     todo = []
     current = {}
     for volume_id, n, source in openings:
@@ -201,9 +195,6 @@ def mirror(dataset: Path, fetcher: Fetcher, *, minutes: float = 10, limit: int |
             if previous.get("sha256") and whole:
                 current[key] = previous
                 continue
-            if previous.get("failed") and now() - previous["failed"] < RETRY_FAILED_SECONDS:
-                current[key] = previous
-                continue
         elif not previous and whole and _is_jpeg(paths["full"]):
             # A scan already on disk is kept when the record of it was lost, rather than deleted and fetched again.
             current[key] = {"source": source, "sha256": hashlib.sha256(paths["full"].read_bytes()).hexdigest()}
@@ -213,7 +204,32 @@ def mirror(dataset: Path, fetcher: Fetcher, *, minutes: float = 10, limit: int |
             if path.is_file():
                 path.unlink()
                 removed += 1
-        todo.append((volume_id, n, source))
+        if previous.get("source") == source and previous.get("failed") and now() - previous["failed"] < RETRY_FAILED_SECONDS:
+            current[key] = previous
+        else:
+            todo.append((volume_id, n, source))
+    return current, todo, removed
+
+
+def prune(dataset: Path) -> int:
+    """Reconciles the cache before upload without contacting image hosts."""
+    if not (dataset / "volumes" / "manifest.json").exists():
+        return 0
+    current, _, removed = _reconcile(dataset, published_openings(dataset), time.time)
+    _write(dataset / STATE, json.dumps(current, sort_keys=True).encode("utf-8"))
+    return removed
+
+
+def mirror(dataset: Path, fetcher: Fetcher, *, minutes: float = 10, limit: int | None = None, clock=time.monotonic,
+           now=time.time) -> dict:
+    """Mirrors scans not yet copied until the time or count budget is spent, saving progress as it goes."""
+    if not (dataset / "volumes" / "manifest.json").exists():
+        return {"copied": 0, "skipped": 0, "removed": 0, "mirrored": 0, "openings": 0, "outage": ""}
+    state_path = dataset / STATE
+    openings = published_openings(dataset)
+    deadline = clock() + minutes * 60
+    current, todo, removed = _reconcile(dataset, openings, now)
+    copied, skipped, outage = 0, 0, ""
     try:
         for volume_id, n, source in todo:
             if clock() >= deadline or (limit is not None and copied >= limit):
@@ -251,11 +267,17 @@ def mirror(dataset: Path, fetcher: Fetcher, *, minutes: float = 10, limit: int |
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", type=Path, required=True, help="The publisher's output folder, holding volumes/")
-    parser.add_argument("--contact", required=True, help="A web page or address for the User-Agent, so edisondigital knows who is asking")
+    parser.add_argument("--contact", help="A web page or address for the User-Agent, so edisondigital knows who is asking")
+    parser.add_argument("--prune-only", action="store_true", help="Remove obsolete cached scans before uploading, with no network requests")
     parser.add_argument("--minutes", type=float, default=10, help="Stop starting new scans after this long")
     parser.add_argument("--limit", type=int, help="Stop after copying this many scans")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    if args.prune_only:
+        logger.info("removed %d obsolete cache entries", prune(args.dataset))
+        return 0
+    if not args.contact:
+        parser.error("--contact is required when fetching scans")
     mirror(args.dataset, Fetcher(args.contact), minutes=args.minutes, limit=args.limit)
     # An outage is a normal pause, not a failure: the next run resumes where this one stopped.
     return 0

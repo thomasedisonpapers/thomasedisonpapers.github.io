@@ -49,13 +49,14 @@ host (`github.io`) in `web/` or `builder/`.
 
 ## Uploading the dataset
 
-`builder/upload.py` sends the publisher's output (`local/` and `embeddings/`) to the Hugging Face dataset. It never touches
-`edisondigital/`, which belongs to the harvester.
+`builder/upload.py` sends the publisher's output (`local/`, `volumes/`, `scans/` and `embeddings/`) to the Hugging Face dataset.
+The harvester manages `edisondigital/` separately.
 
 1. **Sign in once on the machine that uploads,** with a fine-grained token that can write only to the dataset:
    `.venv/Scripts/hf auth login`. You can also set `HF_TOKEN` for one session. The script never prints the token or takes
    it on the command line.
 2. **Check, then look before sending:**
+   - `python builder/mirror_scans.py --dataset out/dataset --prune-only` removes withdrawn and superseded scan files locally before a manual upload;
    - `python builder/upload.py --dataset out/dataset --check-only` runs the public-boundary check alone, offline;
    - `python builder/upload.py --dataset out/dataset --dry-run` shows how many files would be sent, replaced and removed.
 3. **Upload:** `python builder/upload.py --dataset out/dataset`. The uploader validates and sends a temporary copy of
@@ -100,7 +101,7 @@ The host keeps the site in step with the review platform, with no change to the 
         no PyTorch, and its vectors match Amarel's PyTorch ones to a cosine of 0.9999;
       - `collect` folds them into the store, and `related` recomputes each document's related documents.
 
-   4. `upload.py` sends whatever changed. The host uploads Arctic and falls back to records alone if embedding fails.
+   4. `upload.py` sends whatever changed after local scan-cache reconciliation. The host uploads Arctic and falls back to records alone if embedding fails.
       Other models, such as Qwen3 from Amarel, stay on `main` when their document and passage references still match the
       catalogue. Incompatible model files are removed in the same commit as the catalogue update.
 

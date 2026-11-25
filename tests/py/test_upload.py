@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+import mirror_scans
 import upload
 
 JPEG = b"\xff\xd8\xff\xdb\x00\x04\x00\x00\xff\xd9"
@@ -486,6 +487,41 @@ def test_upload_removes_the_last_remote_scan_when_the_local_mirror_is_empty(tmp_
     hub = FakeHub(files={obsolete: JPEG})
     upload.upload(dataset, "org/repo", hub)
     assert obsolete not in hub.files
+
+
+def test_the_publish_preflight_allows_withdrawal_even_with_cached_scans(tmp_path):
+    dataset = _volumes(_dataset(tmp_path / "data"))
+    hub = FakeHub(cache=tmp_path / "cache")
+    upload.upload(dataset, "org/repo", hub)
+    (dataset / "volumes" / "A234A" / "volume.json").unlink()
+    (dataset / "volumes" / "manifest.json").write_text('{"volumes": {}, "withdrawn": ["A234A"]}', "utf-8")
+
+    mirror_scans.main(["--dataset", str(dataset), "--prune-only"])
+    upload.upload(dataset, "org/repo", hub)
+    assert not any(path.startswith(("volumes/A234A/", "scans/A234A/")) for path in hub.files)
+
+
+def test_the_publish_preflight_excludes_old_scan_bytes_when_the_source_changes(tmp_path):
+    dataset = _volumes(_dataset(tmp_path / "data"))
+    hub = FakeHub(cache=tmp_path / "cache")
+    upload.upload(dataset, "org/repo", hub)
+    volume_path = dataset / "volumes" / "A234A" / "volume.json"
+    volume = json.loads(volume_path.read_text("utf-8"))
+    opening = volume["openings"][0]
+    state = dataset / mirror_scans.STATE
+    state.parent.mkdir()
+    state.write_text(json.dumps({"A234A/1": {"source": opening["source"], "sha256": hashlib.sha256(JPEG).hexdigest()}}), "utf-8")
+    opening["source"] = "https://edisondigital.rutgers.edu/files/original/A234A/replacement.jpg"
+    volume["hash"] = _volume_hash(volume)
+    volume_path.write_text(json.dumps(volume), "utf-8")
+    manifest_path = dataset / "volumes" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text("utf-8"))
+    manifest["volumes"]["A234A"]["hash"] = volume["hash"]
+    manifest_path.write_text(json.dumps(manifest), "utf-8")
+
+    mirror_scans.main(["--dataset", str(dataset), "--prune-only"])
+    upload.upload(dataset, "org/repo", hub)
+    assert set(hub.commits[-1][1]) == {"volumes/A234A/volume.json", "volumes/manifest.json", "scans/A234A/full/0001.jpg"}
 
 
 def test_embeddings_of_an_account_book_opening_are_accepted(tmp_path):
